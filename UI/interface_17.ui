@@ -1,0 +1,2048 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Form</class>
+ <widget class="QWidget" name="Form">
+  <property name="enabled">
+   <bool>true</bool>
+  </property>
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1340</width>
+    <height>845</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Face Calibration</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">/* ========== GroupBox：左上→右下 浅灰→白→浅灰 渐变（加深版） ========== */
+QGroupBox {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                                stop:0 #dee2e6,    
+                                stop:0.5 #ffffff,  
+                                stop:1 #dee2e6);   
+    border: 1px solid #d0d7e3;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding-top: 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 8px;
+    color: #2c3e50;
+    background-color: transparent;
+}
+
+/* ========== 全局 QSpinBox 样式 ========== */
+QSpinBox {
+    min-width: 31px;
+    max-width: 31px;
+    height: 28px;
+    border: 2px solid rgb(208, 208, 208);
+    border-radius: 6px;
+    padding: 2px 4px;
+    background-color: #ffffff;
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 20px;
+}
+QSpinBox[objectName*=&quot;M&quot;] {
+    min-width: 51px;
+    max-width: 51px;
+	border: 2px solid rgb(170, 170, 170);
+	border-radius: 4px;
+}
+
+/* ========== 按钮样式：新增立体渐变+文字加粗，其他不变 ========== */
+/* 基础按钮（浅蓝加深版+立体渐变+文字加粗） */
+QPushButton {
+    /* 立体渐变背景：上浅下深，增强凸起感 */
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #e6f2ff, stop:0.5 #dceeff, stop:1 #d0e5ff);
+    color: #1e88e5; /* 文字蓝加深 */
+    font-weight: bold; /* 核心：文字加粗 */
+    border: 1px solid;
+    border-color: #b9d9fb #9fc8f7 #9fc8f7 #b9d9fb; /* 立体边框 */
+    border-radius: 6px;
+    padding: 6px 16px; /* 上下内边距减少，降低高度 */
+    min-height: 28px; /* 按钮高度从32→28px */
+    min-width: 80px;
+    font-size: 9pt;
+}
+
+/* 悬停状态：渐变加深+文字加粗保留 */
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #d7e9ff, stop:0.5 #cbe4ff, stop:1 #bddcff);
+    border-color: #9fc8f7 #80b7f5 #80b7f5 #9fc8f7;
+}
+
+/* 按下状态：反向渐变+文字加粗保留 */
+QPushButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #b8d8ff, stop:0.5 #c1ddff, stop:1 #cbe4ff);
+    border-color: #80b7f5 #9fc8f7 #9fc8f7 #80b7f5;
+}
+
+/* 禁用状态：无渐变+文字加粗保留 */
+QPushButton:disabled {
+    background: #f8f9fa;
+    color: #ced4da;
+    font-weight: bold;
+    border-color: #e9ecef;
+}
+
+/* ========== 高亮按钮（保存类：浅绿渐变+文字加粗） ========== */
+QPushButton[objectName*=&quot;save&quot;], 
+QPushButton[objectName*=&quot;openORclose&quot;], 
+QPushButton[objectName*=&quot;confirm&quot;],
+QPushButton[objectName*=&quot;ok&quot;] {
+    /* 浅绿立体渐变 */
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #f0fae8, stop:0.5 #e6f7e0, stop:1 #dcf4d2);
+    color: #389e0d; /* 文字绿加深 */
+    font-weight: bold; /* 文字加粗 */
+    border-color: #c5e8b7 #a3d98b #a3d98b #c5e8b7;
+}
+QPushButton[objectName*=&quot;save&quot;]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #e7f5d9, stop:0.5 #d7f0cb, stop:1 #c8e7bc);
+    border-color: #a3d98b #82c91e #82c91e #a3d98b;
+}
+QPushButton[objectName*=&quot;save&quot;]:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #c8e7bc, stop:0.5 #d0e9c4, stop:1 #d7f0cb);
+    border-color: #82c91e #a3d98b #a3d98b #82c91e;
+}
+
+/* ========== 危险按钮（重置/复原类：浅红渐变+文字加粗） ========== */
+QPushButton[objectName*=&quot;reset&quot;], 
+QPushButton[objectName*=&quot;delete&quot;],
+QPushButton[objectName*=&quot;clear&quot;],
+QPushButton[objectName*=&quot;复原&quot;] {
+    /* 浅红立体渐变 */
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #fff0ee, stop:0.5 #ffe8e6, stop:1 #ffdedb);
+    color: #cf1322; /* 文字红加深 */
+    font-weight: bold; /* 文字加粗 */
+    border-color: #ffccc7 #ff9a9e #ff9a9e #ffccc7;
+}
+QPushButton[objectName*=&quot;reset&quot;]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #ffe9e6, stop:0.5 #ffd9d6, stop:1 #ffc9c6);
+    border-color: #ff9a9e #ff4d4f #ff4d4f #ff9a9e;
+}
+QPushButton[objectName*=&quot;reset&quot;]:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                stop:0 #ffc9c6, stop:0.5 #ffd0cd, stop:1 #ffd9d6);
+    border-color: #ff4d4f #ff9a9e #ff9a9e #ff4d4f;
+}</string>
+  </property>
+  <property name="title" stdset="0">
+   <string>GroupBox</string>
+  </property>
+  <widget class="QLabel" name="label_38">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="geometry">
+    <rect>
+     <x>610</x>
+     <y>880</y>
+     <width>1</width>
+     <height>1</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>A28:无</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_39">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="geometry">
+    <rect>
+     <x>620</x>
+     <y>880</y>
+     <width>1</width>
+     <height>1</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>左</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_40">
+   <property name="enabled">
+    <bool>false</bool>
+   </property>
+   <property name="geometry">
+    <rect>
+     <x>620</x>
+     <y>880</y>
+     <width>1</width>
+     <height>1</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string>右</string>
+   </property>
+  </widget>
+  <widget class="QGroupBox" name="groupBox">
+   <property name="geometry">
+    <rect>
+     <x>1160</x>
+     <y>0</y>
+     <width>171</width>
+     <height>841</height>
+    </rect>
+   </property>
+   <property name="title">
+    <string>设置</string>
+   </property>
+   <widget class="QLabel" name="label_41">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>200</y>
+      <width>41</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>配  置:</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_serial_port_2">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>20</y>
+      <width>131</width>
+      <height>31</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <family>Microsoft Himalaya</family>
+     </font>
+    </property>
+    <property name="text">
+     <string>串口号</string>
+    </property>
+    <property name="textInteractionFlags">
+     <set>Qt::TextInteractionFlag::LinksAccessibleByMouse|Qt::TextInteractionFlag::TextSelectableByMouse</set>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_refresh_serial">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>90</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>刷新串口</string>
+    </property>
+   </widget>
+   <widget class="QComboBox" name="comboBox_serial_port">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>50</y>
+      <width>151</width>
+      <height>31</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_save">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>280</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>保存配置</string>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEdit_config">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>190</y>
+      <width>111</width>
+      <height>31</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QListWidget" name="listWidget_file">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>420</y>
+      <width>151</width>
+      <height>261</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_refresh">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>370</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>刷新bs文件</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_load_state">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>690</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>载入动作</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_reset_state">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>740</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>复原初始动作</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_save_state">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>790</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>保存当前动作</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_load">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>230</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>载入配置</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="pushButton_openORclose_serial">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>140</y>
+      <width>151</width>
+      <height>42</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>打开串口</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_47">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>340</y>
+      <width>41</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>表  情:</string>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="lineEdit_bs">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>330</y>
+      <width>111</width>
+      <height>31</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QGroupBox" name="groupBox_2">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1151</width>
+     <height>841</height>
+    </rect>
+   </property>
+   <property name="title">
+    <string>控制</string>
+   </property>
+   <widget class="QSlider" name="Slider_10">
+    <property name="geometry">
+     <rect>
+      <x>700</x>
+      <y>250</y>
+      <width>25</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QTextBrowser" name="textBrowser">
+    <property name="geometry">
+     <rect>
+      <x>480</x>
+      <y>20</y>
+      <width>151</width>
+      <height>51</height>
+     </rect>
+    </property>
+    <property name="font">
+     <font>
+      <pointsize>10</pointsize>
+     </font>
+    </property>
+    <property name="html">
+     <string>&lt;!DOCTYPE HTML PUBLIC &quot;-//W3C//DTD HTML 4.0//EN&quot; &quot;http://www.w3.org/TR/REC-html40/strict.dtd&quot;&gt;
+&lt;html&gt;&lt;head&gt;&lt;meta name=&quot;qrichtext&quot; content=&quot;1&quot; /&gt;&lt;meta charset=&quot;utf-8&quot; /&gt;&lt;style type=&quot;text/css&quot;&gt;
+p, li { white-space: pre-wrap; }
+hr { height: 1px; border-width: 0; }
+li.unchecked::marker { content: &quot;\2610&quot;; }
+li.checked::marker { content: &quot;\2612&quot;; }
+&lt;/style&gt;&lt;/head&gt;&lt;body style=&quot; font-family:'Microsoft YaHei UI'; font-size:10pt; font-weight:400; font-style:normal;&quot;&gt;
+&lt;p style=&quot; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;&quot;&gt;&lt;span style=&quot; font-family:'.AppleSystemUIFont'; font-size:13pt;&quot;&gt;机器人头面朝你时，拖动的方向和机器点位运动方向一致&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_0_E">
+    <property name="geometry">
+     <rect>
+      <x>670</x>
+      <y>40</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_30">
+    <property name="geometry">
+     <rect>
+      <x>850</x>
+      <y>620</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>前</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_0_M">
+    <property name="geometry">
+     <rect>
+      <x>710</x>
+      <y>40</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_22">
+    <property name="geometry">
+     <rect>
+      <x>590</x>
+      <y>700</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>后</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_25_E">
+    <property name="geometry">
+     <rect>
+      <x>160</x>
+      <y>660</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_18_E">
+    <property name="geometry">
+     <rect>
+      <x>450</x>
+      <y>670</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_28">
+    <property name="geometry">
+     <rect>
+      <x>240</x>
+      <y>570</y>
+      <width>101</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A22:右嘴角前—后</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_1_M">
+    <property name="geometry">
+     <rect>
+      <x>380</x>
+      <y>40</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_12">
+    <property name="geometry">
+     <rect>
+      <x>670</x>
+      <y>210</y>
+      <width>111</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A10:左眼球 下—上</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_8_M">
+    <property name="geometry">
+     <rect>
+      <x>990</x>
+      <y>280</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_1_E">
+    <property name="geometry">
+     <rect>
+      <x>340</x>
+      <y>40</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_9_E">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>230</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_22_E">
+    <property name="geometry">
+     <rect>
+      <x>90</x>
+      <y>590</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_14">
+    <property name="geometry">
+     <rect>
+      <x>760</x>
+      <y>270</y>
+      <width>111</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A12:左眼球 内—外</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_10_M">
+    <property name="geometry">
+     <rect>
+      <x>710</x>
+      <y>230</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_22_S">
+    <property name="geometry">
+     <rect>
+      <x>240</x>
+      <y>590</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_34">
+    <property name="geometry">
+     <rect>
+      <x>230</x>
+      <y>620</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>前</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_8_E">
+    <property name="geometry">
+     <rect>
+      <x>1040</x>
+      <y>220</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_9">
+    <property name="geometry">
+     <rect>
+      <x>60</x>
+      <y>250</y>
+      <width>25</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_19">
+    <property name="geometry">
+     <rect>
+      <x>530</x>
+      <y>630</y>
+      <width>22</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_8">
+    <property name="geometry">
+     <rect>
+      <x>1050</x>
+      <y>249</y>
+      <width>22</width>
+      <height>91</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_1">
+    <property name="geometry">
+     <rect>
+      <x>370</x>
+      <y>60</y>
+      <width>22</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_37">
+    <property name="enabled">
+     <bool>false</bool>
+    </property>
+    <property name="geometry">
+     <rect>
+      <x>120</x>
+      <y>770</y>
+      <width>1</width>
+      <height>1</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A27:无</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_18">
+    <property name="geometry">
+     <rect>
+      <x>590</x>
+      <y>500</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>后</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_26_E">
+    <property name="geometry">
+     <rect>
+      <x>750</x>
+      <y>790</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_24_E">
+    <property name="geometry">
+     <rect>
+      <x>800</x>
+      <y>590</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_22_M">
+    <property name="geometry">
+     <rect>
+      <x>280</x>
+      <y>590</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_16_M">
+    <property name="geometry">
+     <rect>
+      <x>540</x>
+      <y>410</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_13_S">
+    <property name="geometry">
+     <rect>
+      <x>280</x>
+      <y>290</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_23_M">
+    <property name="geometry">
+     <rect>
+      <x>890</x>
+      <y>530</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_23">
+    <property name="geometry">
+     <rect>
+      <x>470</x>
+      <y>700</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>前</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_0_S">
+    <property name="geometry">
+     <rect>
+      <x>690</x>
+      <y>160</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_2">
+    <property name="geometry">
+     <rect>
+      <x>670</x>
+      <y>20</y>
+      <width>111</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A0:左眉头 下—上</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_11">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>210</y>
+      <width>101</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A9:右眼皮 开—合</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_33">
+    <property name="geometry">
+     <rect>
+      <x>140</x>
+      <y>510</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A25:右嘴角 上—下</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_8_S">
+    <property name="geometry">
+     <rect>
+      <x>1040</x>
+      <y>340</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_23_E">
+    <property name="geometry">
+     <rect>
+      <x>850</x>
+      <y>530</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_17_E">
+    <property name="geometry">
+     <rect>
+      <x>450</x>
+      <y>470</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_36">
+    <property name="geometry">
+     <rect>
+      <x>770</x>
+      <y>700</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A26:下巴 开—合</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_12_E">
+    <property name="geometry">
+     <rect>
+      <x>760</x>
+      <y>290</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_11_E">
+    <property name="geometry">
+     <rect>
+      <x>340</x>
+      <y>230</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_24">
+    <property name="geometry">
+     <rect>
+      <x>840</x>
+      <y>590</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_16">
+    <property name="geometry">
+     <rect>
+      <x>530</x>
+      <y>430</y>
+      <width>22</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_9_S">
+    <property name="geometry">
+     <rect>
+      <x>50</x>
+      <y>350</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_12_M">
+    <property name="geometry">
+     <rect>
+      <x>800</x>
+      <y>290</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_16_E">
+    <property name="geometry">
+     <rect>
+      <x>520</x>
+      <y>530</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_18_S">
+    <property name="geometry">
+     <rect>
+      <x>590</x>
+      <y>670</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_15">
+    <property name="geometry">
+     <rect>
+      <x>440</x>
+      <y>270</y>
+      <width>111</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A13:右眼球 内—外</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_25">
+    <property name="geometry">
+     <rect>
+      <x>500</x>
+      <y>590</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A19:中下嘴唇 上—下</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_1_S">
+    <property name="geometry">
+     <rect>
+      <x>360</x>
+      <y>160</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_17_M">
+    <property name="geometry">
+     <rect>
+      <x>640</x>
+      <y>470</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_24_M">
+    <property name="geometry">
+     <rect>
+      <x>980</x>
+      <y>590</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_25_M">
+    <property name="geometry">
+     <rect>
+      <x>180</x>
+      <y>530</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_11_M">
+    <property name="geometry">
+     <rect>
+      <x>380</x>
+      <y>230</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_10_E">
+    <property name="geometry">
+     <rect>
+      <x>690</x>
+      <y>350</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_22">
+    <property name="geometry">
+     <rect>
+      <x>140</x>
+      <y>590</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_20">
+    <property name="geometry">
+     <rect>
+      <x>500</x>
+      <y>390</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A16:中上嘴唇 上—下</string>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_18">
+    <property name="geometry">
+     <rect>
+      <x>490</x>
+      <y>670</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_27">
+    <property name="enabled">
+     <bool>false</bool>
+    </property>
+    <property name="geometry">
+     <rect>
+      <x>120</x>
+      <y>770</y>
+      <width>1</width>
+      <height>1</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_29">
+    <property name="geometry">
+     <rect>
+      <x>850</x>
+      <y>510</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A23:左嘴角 上—下</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_19_M">
+    <property name="geometry">
+     <rect>
+      <x>540</x>
+      <y>610</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_19_E">
+    <property name="geometry">
+     <rect>
+      <x>520</x>
+      <y>730</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_9_M">
+    <property name="geometry">
+     <rect>
+      <x>80</x>
+      <y>290</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_24_S">
+    <property name="geometry">
+     <rect>
+      <x>940</x>
+      <y>590</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_11">
+    <property name="geometry">
+     <rect>
+      <x>370</x>
+      <y>250</y>
+      <width>25</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_26_S">
+    <property name="geometry">
+     <rect>
+      <x>750</x>
+      <y>720</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_0">
+    <property name="geometry">
+     <rect>
+      <x>700</x>
+      <y>69</y>
+      <width>22</width>
+      <height>91</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_12">
+    <property name="geometry">
+     <rect>
+      <x>650</x>
+      <y>290</y>
+      <width>111</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_10_S">
+    <property name="geometry">
+     <rect>
+      <x>670</x>
+      <y>230</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_23">
+    <property name="geometry">
+     <rect>
+      <x>880</x>
+      <y>550</y>
+      <width>22</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_24">
+    <property name="geometry">
+     <rect>
+      <x>590</x>
+      <y>650</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A18:中下嘴唇 前—后</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_25_S">
+    <property name="geometry">
+     <rect>
+      <x>140</x>
+      <y>530</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_13_M">
+    <property name="geometry">
+     <rect>
+      <x>470</x>
+      <y>290</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_11_S">
+    <property name="geometry">
+     <rect>
+      <x>360</x>
+      <y>350</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="value">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_21">
+    <property name="geometry">
+     <rect>
+      <x>600</x>
+      <y>450</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A17:中上嘴唇 后—前</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_3">
+    <property name="geometry">
+     <rect>
+      <x>350</x>
+      <y>20</y>
+      <width>101</width>
+      <height>20</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A1:右眉头 下—上</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_19">
+    <property name="geometry">
+     <rect>
+      <x>490</x>
+      <y>500</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>前</string>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_26">
+    <property name="geometry">
+     <rect>
+      <x>800</x>
+      <y>720</y>
+      <width>22</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_13">
+    <property name="geometry">
+     <rect>
+      <x>330</x>
+      <y>290</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_19_S">
+    <property name="geometry">
+     <rect>
+      <x>500</x>
+      <y>610</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_16_S">
+    <property name="geometry">
+     <rect>
+      <x>500</x>
+      <y>410</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_31">
+    <property name="geometry">
+     <rect>
+      <x>930</x>
+      <y>620</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>后</string>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_12_S">
+    <property name="geometry">
+     <rect>
+      <x>610</x>
+      <y>290</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_13_E">
+    <property name="geometry">
+     <rect>
+      <x>430</x>
+      <y>290</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_13">
+    <property name="geometry">
+     <rect>
+      <x>340</x>
+      <y>210</y>
+      <width>111</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A11:右眼球 下—上</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_10">
+    <property name="geometry">
+     <rect>
+      <x>1020</x>
+      <y>200</y>
+      <width>101</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A8:左眼皮 开—合</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_35">
+    <property name="geometry">
+     <rect>
+      <x>130</x>
+      <y>620</y>
+      <width>21</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>后</string>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_32">
+    <property name="geometry">
+     <rect>
+      <x>940</x>
+      <y>570</y>
+      <width>121</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>A24:左嘴角 前—后</string>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_28">
+    <property name="enabled">
+     <bool>false</bool>
+    </property>
+    <property name="geometry">
+     <rect>
+      <x>360</x>
+      <y>820</y>
+      <width>1</width>
+      <height>1</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_17_S">
+    <property name="geometry">
+     <rect>
+      <x>600</x>
+      <y>470</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_23_S">
+    <property name="geometry">
+     <rect>
+      <x>870</x>
+      <y>650</y>
+      <width>43</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="buttonSymbols">
+     <enum>QAbstractSpinBox::ButtonSymbols::NoButtons</enum>
+    </property>
+    <property name="keyboardTracking">
+     <bool>true</bool>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_26_M">
+    <property name="geometry">
+     <rect>
+      <x>820</x>
+      <y>750</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSpinBox" name="spinBox_18_M">
+    <property name="geometry">
+     <rect>
+      <x>630</x>
+      <y>670</y>
+      <width>63</width>
+      <height>22</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_25">
+    <property name="geometry">
+     <rect>
+      <x>170</x>
+      <y>560</y>
+      <width>25</width>
+      <height>100</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Vertical</enum>
+    </property>
+   </widget>
+   <widget class="QSlider" name="Slider_17">
+    <property name="geometry">
+     <rect>
+      <x>500</x>
+      <y>470</y>
+      <width>100</width>
+      <height>25</height>
+     </rect>
+    </property>
+    <property name="maximum">
+     <number>270</number>
+    </property>
+    <property name="orientation">
+     <enum>Qt::Orientation::Horizontal</enum>
+    </property>
+    <property name="invertedAppearance">
+     <bool>true</bool>
+    </property>
+   </widget>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

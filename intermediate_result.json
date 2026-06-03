@@ -1,0 +1,15 @@
+{
+  "best_angles": {
+    "A8": 138,
+    "A9": 131,
+    "A10": 80,
+    "A11": 198,
+    "A12": 162,
+    "A13": 105
+  },
+  "best_score": 84.78302254527071,
+  "best_eye_score": 84.78302254527071,
+  "iteration": 20,
+  "total_iterations": 20,
+  "region_scores": {}
+}
