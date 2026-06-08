@@ -17,8 +17,10 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 ELLSEG_REPO = os.path.join(DIR, "EllSeg")
 WEIGHTS_PATH = os.path.join(ELLSEG_REPO, "weights", "all.git_ok")
 FACE_POINTS_FILE = os.path.join(DIR, "face_points.json")
+EYELID_BASELINE_FILE = os.path.join(DIR, "eyelid_baseline.json")
 
-TOLERANCE = 2        # 合格阈值 (像素)
+from eye_constants import EYEBALL_OFFSET_TOLERANCE
+TOLERANCE = EYEBALL_OFFSET_TOLERANCE        # 合格阈值 (像素)
 EMA_LM = 0.35         # MediaPipe 关键点 EMA
 EMA_ELL = 0.3         # EllSeg 椭圆 EMA
 EYE_PAD_X = 0.5       # 眼部裁剪水平扩充
@@ -217,6 +219,38 @@ def load_baseline(filepath=None):
 
 
 # ============================================================
+# 眼皮基线管理
+# ============================================================
+def save_eyelid_baseline(left_ear, right_ear, filepath=None):
+    if filepath is None:
+        filepath = EYELID_BASELINE_FILE
+    data = {
+        "left_ear": float(left_ear),
+        "right_ear": float(right_ear),
+    }
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[Eyelid Baseline] Saved: L_EAR={left_ear:.4f} R_EAR={right_ear:.4f}")
+
+
+def load_eyelid_baseline(filepath=None):
+    if filepath is None:
+        filepath = EYELID_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        return {
+            "left_ear": float(d["left_ear"]),
+            "right_ear": float(d["right_ear"]),
+        }
+    except Exception as e:
+        print(f"[Eyelid Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
 # 主类
 # ============================================================
 class EllSegDetector:
@@ -274,6 +308,15 @@ class EllSegDetector:
             print(f"  R_iris = {self.baseline['iris_right']}")
         else:
             print("[Baseline] No baseline found.")
+
+        # 眼皮基线
+        self.eyelid_baseline = load_eyelid_baseline()
+        if self.eyelid_baseline:
+            print(f"[Eyelid Baseline] Loaded from {EYELID_BASELINE_FILE}")
+            print(f"  L_EAR = {self.eyelid_baseline['left_ear']:.4f}")
+            print(f"  R_EAR = {self.eyelid_baseline['right_ear']:.4f}")
+        else:
+            print("[Eyelid Baseline] No eyelid baseline found.")
 
         self._timestamp = 0
         self.last_result = None
@@ -371,8 +414,25 @@ class EllSegDetector:
                 cv2.putText(img, f"Cap FPS: {cap_fps:.1f}", (img.shape[1] - 170, 22),
                            0, 0.45, (200, 200, 200), 1)
 
+                # EAR 眼皮高宽比 (如果有基线)
+                if self.eyelid_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_eyelid_signal()
+                    if signal:
+                        bl = self.eyelid_baseline
+                        l_ear = signal["left_ear"]
+                        r_ear = signal["right_ear"]
+                        l_ok = signal["left_qualified"]
+                        r_ok = signal["right_qualified"]
+                        y_ear = 80
+                        cv2.putText(img, f"L_EAR={l_ear:.3f} (bl={bl['left_ear']:.3f})",
+                                   (10, y_ear), 0, 0.35,
+                                   (0, 255, 0) if l_ok else (0, 0, 255), 1)
+                        cv2.putText(img, f"R_EAR={r_ear:.3f} (bl={bl['right_ear']:.3f})",
+                                   (10, y_ear + 16), 0, 0.35,
+                                   (0, 255, 0) if r_ok else (0, 0, 255), 1)
+
                 # 检测耗时拆解 (ms)
-                timing = det.get("_timing")
+                timing = det.get("_timing") 
                 if timing:
                     total, t_mp, t_ell = timing
                     cv2.putText(img, f"T: {total:.0f}ms  MP: {t_mp:.0f}ms  Ell: {t_ell:.0f}ms",
@@ -401,7 +461,9 @@ class EllSegDetector:
                     self._user_key = key
 
     def start_display(self):
-        """启动显示线程"""
+        """启动显示线程（幂等，已运行则跳过）"""
+        if self._display_thread and self._display_thread.is_alive():
+            return
         self._stop_event.clear()
         self._user_key = None
         self._last_key = None
@@ -566,6 +628,9 @@ class EllSegDetector:
         t_total = 1000 * (time.perf_counter() - t_total)
         out["_timing"] = (t_total, t_mp, t_ell)
 
+        # 保存 lms_smooth 供 get_eyelid_signal() 使用
+        self._last_lms_smooth = lms_smooth
+
         self.last_result = out
         return out
 
@@ -671,6 +736,115 @@ class EllSegDetector:
         save_baseline(**self.baseline)
         return True
 
+    # ==================================================================
+    # 眼皮 EAR 计算与信号
+    # ==================================================================
+
+    @staticmethod
+    def _calc_ear(lms_smooth, pairs, corners):
+        """
+        计算单眼 Eye Aspect Ratio (高宽比)。
+
+        EAR = mean(vertical_pair_distances) / horizontal_distance
+
+        Args:
+            lms_smooth: (N, 2) 平滑后的关键点像素坐标
+            pairs: list of (top_idx, bottom_idx) 元组
+            corners: (outer_idx, inner_idx) 眼角索引
+
+        Returns:
+            float: EAR 值 (0 ~ 1)
+        """
+        vert_dists = []
+        for top_i, btm_i in pairs:
+            dy = lms_smooth[btm_i, 1] - lms_smooth[top_i, 1]
+            dx = lms_smooth[btm_i, 0] - lms_smooth[top_i, 0]
+            vert_dists.append(np.sqrt(dx * dx + dy * dy))
+
+        outer_i, inner_i = corners
+        hor_dist = abs(lms_smooth[inner_i, 0] - lms_smooth[outer_i, 0])
+
+        if hor_dist < 1e-6:
+            return 0.0
+
+        ear = np.mean(vert_dists) / hor_dist
+        return float(ear)
+
+    @staticmethod
+    def _calc_ears(lms_smooth):
+        """计算双眼 EAR。
+
+        Returns:
+            dict: {"left": float, "right": float} 或 None（无检测数据时）
+        """
+        from eye_constants import (
+            LEFT_EAR_PAIRS, LEFT_EYE_CORNERS,
+            RIGHT_EAR_PAIRS, RIGHT_EYE_CORNERS,
+        )
+        return {
+            "left": EllSegDetector._calc_ear(
+                lms_smooth, LEFT_EAR_PAIRS, LEFT_EYE_CORNERS),
+            "right": EllSegDetector._calc_ear(
+                lms_smooth, RIGHT_EAR_PAIRS, RIGHT_EYE_CORNERS),
+        }
+
+    def get_eyelid_signal(self, lms_smooth=None):
+        """
+        返回眼皮 EAR 信号 — 对比基线 EAR。
+
+        Args:
+            lms_smooth: 平滑后的关键点坐标。若为 None，从最近一次 detect 结果获取。
+
+        Returns:
+            dict 或 None:
+              left_ear, right_ear: 当前帧 EAR 值
+              left_delta, right_delta: 与基线的偏差
+                (正值 = 比基线更开, 负值 = 比基线更闭)
+              left_qualified, right_qualified: 是否在容差范围内
+        """
+        if lms_smooth is None:
+            # 尝试从 detect 内部获取 lms_smooth
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.eyelid_baseline is None:
+            return None
+
+        ears = self._calc_ears(lms_smooth)
+
+        bl = self.eyelid_baseline
+        from eye_constants import EYELID_EAR_TOLERANCE
+        tol = EYELID_EAR_TOLERANCE
+
+        left_delta = ears["left"] - bl["left_ear"]
+        right_delta = ears["right"] - bl["right_ear"]
+
+        return {
+            "left_ear": ears["left"],
+            "right_ear": ears["right"],
+            "left_delta": left_delta,
+            "right_delta": right_delta,
+            "left_qualified": abs(left_delta) <= tol,
+            "right_qualified": abs(right_delta) <= tol,
+        }
+
+    def save_current_eyelid_baseline(self, lms_smooth=None):
+        """手动保存当前帧的 EAR 值为眼皮基线"""
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                print("[Eyelid Baseline] Cannot save: no landmark data")
+                return False
+            lms_smooth = self._last_lms_smooth
+
+        ears = self._calc_ears(lms_smooth)
+        self.eyelid_baseline = {
+            "left_ear": ears["left"],
+            "right_ear": ears["right"],
+        }
+        save_eyelid_baseline(left_ear=ears["left"], right_ear=ears["right"])
+        return True
+
     def close(self):
         self.stop_display()
         if hasattr(self, 'landmarker') and self.landmarker:
@@ -689,7 +863,7 @@ if __name__ == "__main__":
 
     detector = EllSegDetector()
     detector.start_display()
-    print("\n[S] Save baseline  [1] Toggle MP  [2] Toggle EllSeg  [Q] Quit")
+    print("\n[S] Save eyeball baseline  [E] Save eyelid baseline  [1] Toggle MP  [2] Toggle EllSeg  [Q] Quit")
 
     if raw_test:
         print("\n[Raw FPS Test] 仅测量摄像头原始读取帧率 (跳过 MediaPipe + EllSeg)...")
@@ -714,6 +888,10 @@ if __name__ == "__main__":
             last = detector._last_key
             if last in (ord('s'), ord('S')):
                 detector.save_current_baseline()
+                detector._last_key = None
+            # 检测 E 键保存眼皮基线
+            if last in (ord('e'), ord('E')):
+                detector.save_current_eyelid_baseline()
                 detector._last_key = None
 
     except KeyboardInterrupt:

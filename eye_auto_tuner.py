@@ -8,9 +8,12 @@ Eye Auto Tuner — 眼睛舵机调整工具 (主入口)
   ellseg_scorer.py   - 摄像头采集 + EllSeg虹膜偏移检测 (EllSegDetector)
 
 检测方式:
-  用 EllSeg 检测虹膜位置，与基线对比计算像素偏移。
-  合格条件: 双眼虹膜偏移均 ≤ TOLERANCE(2px)。
-  判定标准: 规定帧数内，≥50% 帧合格则通过。
+  - 眼球模式 (eyeball): 用 EllSeg 检测虹膜位置，与基线对比计算像素偏移
+  - 眼皮模式 (eyelid):  用 MediaPipe 关键点计算 EAR，与基线对比
+
+运行方式:
+  python eye_auto_tuner.py                  # 默认: 眼球 A10-A13
+  python eye_auto_tuner.py --mode eyelid    # 眼皮 A8-A9
 """
 
 import os
@@ -22,15 +25,18 @@ from Motor import FaceController
 from Communication import UARTDevice
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
-    EYEBALL_CHANNELS,
+    EYEBALL_CHANNELS, EYELID_CHANNELS,
     DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX,
-    CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, FLIP_HORIZONTAL,
+    CAMERA_INDEX, FLIP_HORIZONTAL,
+    EYELID_EAR_TOLERANCE, EYELID_WAIT_SECONDS, EYELID_MAX_ITERATIONS,
     TuningResult,
 )
 from ellseg_scorer import EllSegDetector, TOLERANCE
 
 # 眼球舵机名称 (A10-A13)
 EYEBALL_NAMES = [f"A{ch}" for ch in EYEBALL_CHANNELS]
+# 眼皮舵机名称 (A8-A9)
+EYELID_NAMES = [f"A{ch}" for ch in EYELID_CHANNELS]
 
 
 class EyeAutoTuner:
@@ -128,7 +134,7 @@ class EyeAutoTuner:
         )
 
     # ==================================================================
-    # 多帧采集 + 修剪平均
+    # 多帧采集 + 修剪平均 — 眼球
     # ==================================================================
 
     def collect_guide_samples(self, n_frames: int = 60, trim: int = 10):
@@ -231,6 +237,7 @@ class EyeAutoTuner:
         pixel_to_degree: float = 2.0,
         max_iterations: int = 50,
         wait_seconds: float = 1.0,
+        keep_display: bool = False,
     ) -> Tuple[bool, int, dict]:
         """
         引导式自动调整 — 只调整 A10-A13 眼球舵机。
@@ -385,6 +392,270 @@ class EyeAutoTuner:
             return False, iteration, {}
 
         finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 眼皮 EAR
+    # ==================================================================
+
+    def collect_eyelid_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 EAR → 关闭 → 修剪平均。
+
+        流程:
+          1. 开启 MP
+          2. 连续采集 n_frames 帧 EAR 信号
+          3. 关闭 MP
+          4. 按 abs(L_delta) + abs(R_delta) 排序，修剪上下
+          5. 返回平均 EAR 信号
+
+        Returns:
+            dict 或 None: {"left_ear", "right_ear", "left_delta", "right_delta",
+                           "left_qualified", "right_qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (total_deviation, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_eyelid_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            total_dev = abs(signal["left_delta"]) + abs(signal["right_delta"])
+            samples.append((total_dev, {
+                "left_ear": signal["left_ear"],
+                "right_ear": signal["right_ear"],
+                "left_delta": signal["left_delta"],
+                "right_delta": signal["right_delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"Eyelid Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [Eyelid Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {}
+        for key in ["left_ear", "right_ear", "left_delta", "right_delta"]:
+            avg[key] = sum(s[1][key] for s in trimmed) / n
+
+        tol = EYELID_EAR_TOLERANCE
+        avg["left_qualified"] = abs(avg["left_delta"]) <= tol
+        avg["right_qualified"] = abs(avg["right_delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [Eyelid Collect] {len(samples)} frames, trim {trim}: "
+              f"L_delta={avg['left_delta']:+.4f} R_delta={avg['right_delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 眼皮 (A8-A9)
+    # ==================================================================
+
+    def auto_adjust_eyelid(
+        self,
+        ear_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A8/A9 眼皮舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP（仅 MediaPipe 关键点）
+          2. 采集 60 帧 → 去头尾求平均 EAR
+          3. 关闭 MP
+          4. 若左右眼 EAR 偏差均 ≤ 容差 → 通过
+          5. 否则按偏差方向移动 A8/A9 → 等待 → 下一轮
+
+        Args:
+            ear_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大循环次数 (默认 EYELID_MAX_ITERATIONS)
+            wait_seconds:   每次移动后等待秒数 (默认 EYELID_WAIT_SECONDS)
+
+        Returns:
+            (passed: bool, iterations: int, final_ear_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = EYELID_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = EYELID_WAIT_SECONDS
+
+        if self.scorer.eyelid_baseline is None:
+            print("[WARN] 未加载眼皮基线! 请先在 ellseg_scorer.py 中按 [E] 保存眼皮基线到 eyelid_baseline.json")
+            return False, 0, {}
+
+        tol = EYELID_EAR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅眼皮 A8-A9)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 EAR")
+        print(f"  步长: {ear_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: 左右眼 EAR 偏差 ≤ {tol}")
+        bl = self.scorer.eyelid_baseline
+        print(f"  基线: L_EAR={bl['left_ear']:.4f} R_EAR={bl['right_ear']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        current_angles = {
+            ch: self.controller.list_temp_deg[ch]
+            for ch in EYELID_CHANNELS
+        }
+        print(f"  初始角度: {dict(zip(EYELID_NAMES, [current_angles[c] for c in EYELID_CHANNELS]))}")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 EAR ----
+                avg_signal = self.collect_eyelid_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    self.scorer.update_hud([
+                        (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
+                    ])
+                    print(f"  [Eyelid Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                l_delta = avg_signal["left_delta"]
+                r_delta = avg_signal["right_delta"]
+                l_ear = avg_signal["left_ear"]
+                r_ear = avg_signal["right_ear"]
+
+                # ---- 检查是否已合格 ----
+                l_ok = abs(l_delta) <= tol
+                r_ok = abs(r_delta) <= tol
+
+                print(f"  [Eyelid Iter {iteration:3d}] "
+                      f"L_EAR={l_ear:.4f} (Δ={l_delta:+.4f}) "
+                      f"R_EAR={r_ear:.4f} (Δ={r_delta:+.4f})")
+
+                if l_ok and r_ok:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次")
+                    print(f"      L_EAR={l_ear:.4f}  R_EAR={r_ear:.4f}")
+                    final_ang = " ".join([f"{n}={current_angles[c]}度"
+                                         for n, c in zip(EYELID_NAMES, EYELID_CHANNELS)])
+                    print(f"      角度: {final_ang}")
+                    print(f"{'='*60}\n")
+
+                    # 合并眼球当前角度到完整配置
+                    all_angles = []
+                    for ch in EYE_SERVO_CHANNELS:
+                        if ch in current_angles:
+                            all_angles.append(current_angles[ch])
+                        else:
+                            all_angles.append(self.controller.list_temp_deg[ch])
+                    self.save_result(all_angles)
+                    self.export_angle_config(all_angles)
+
+                    self.scorer.update_hud([("★★ EYELID PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A8/A9: 先调偏差大的眼 ----
+                # adj_map: delta > 0 = 太开 → 关 (-1); delta < 0 = 太闭 → 开 (+1)
+                a8_sign = getattr(self, '_eyelid_a8_flip', -1)
+                a9_sign = getattr(self, '_eyelid_a9_flip', 1)
+
+                l_need = abs(l_delta) > tol
+                r_need = abs(r_delta) > tol
+
+                if not l_need and not r_need:
+                    print(f"  [Eyelid Iter {iteration:3d}] 无需移动 (偏差在容差内)")
+                else:
+                    # 选偏差大的那只眼单独调整
+                    if not r_need or (l_need and abs(l_delta) >= abs(r_delta)):
+                        side = "L"
+                        ch = EYELID_CHANNELS[0]
+                        name = EYELID_NAMES[0]
+                        sign = a8_sign
+                        d = l_delta
+                    else:
+                        side = "R"
+                        ch = EYELID_CHANNELS[1]
+                        name = EYELID_NAMES[1]
+                        sign = a9_sign
+                        d = r_delta
+
+                    delta = sign * (-1 if d > tol else (1 if d < -tol else 0))
+                    new_angle = round(current_angles[ch] + delta * ear_step)
+                    lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
+                    new_angle = max(lo, min(hi, new_angle))
+                    self.send_servo(ch, new_angle, (lo, hi))
+                    current_angles[ch] = new_angle
+                    print(f"  [Eyelid Iter {iteration:3d}] 移动 {side}: {name}={new_angle}度 "
+                          f"(EAR Δ={d:+.4f}, Δangle={delta:+.0f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 眼皮未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
             self.scorer.stop_display()
 
     # ==================================================================
@@ -457,8 +728,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="眼睛舵机调整工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+运行模式:
+  python eye_auto_tuner.py                  # 默认: 自动调整眼球 (A10-A13)
+  python eye_auto_tuner.py --mode eyeball   # 同上
+  python eye_auto_tuner.py --mode eyelid    # 自动调整眼皮 (A8-A9)
+        """,
     )
 
+    parser.add_argument("--mode", type=str, default="eyeball",
+                       choices=["eyeball", "eyelid"],
+                       help="调整模式: eyeball=眼球(A10-A13), eyelid=眼皮(A8-A9) (默认: eyeball)")
     parser.add_argument("--port", type=str, default="COM5",
                        help="串口端口号 (默认: COM5)")
     parser.add_argument("--baud", type=int, default=115200,
@@ -467,22 +747,38 @@ def main():
                        help="每次采集稳定帧数 (默认: 8)")
     parser.add_argument("--settle", type=int, default=300,
                        help="舵机等待时间ms (默认: 300)")
+
+    # 眼球模式参数
     parser.add_argument("--ratio", type=float, default=2.0,
-                       help="像素→角度换算系数 (默认: 2.0 °/px)")
+                       help="像素→角度换算系数 (默认: 2.0 deg/px)")
     parser.add_argument("--max-iter", type=int, default=50,
                        help="自动调整最大迭代次数 (默认: 50)")
     parser.add_argument("--wait", type=float, default=1.0,
                        help="每次移动后等待秒数 (默认: 1.0)")
 
+    # 眼皮模式参数
+    parser.add_argument("--ear-step", type=float, default=1.0,
+                       help="眼皮每次调整步长(deg) (默认: 1.0)")
+    parser.add_argument("--eyelid-max-iter", type=int, default=300,
+                       help="眼皮调整最大迭代次数 (默认: 30)")
+    parser.add_argument("--eyelid-wait", type=float, default=1.0,
+                       help="眼皮每轮等待秒数 (默认: 1.0)")
+    parser.add_argument("--eyelid-a8-flip", action="store_true",
+                       help="翻转 A8 舵机方向符号")
+    parser.add_argument("--eyelid-a9-flip", action="store_true",
+                       help="翻转 A9 舵机方向符号")
+
     args = parser.parse_args()
 
-    print("""
+    mode = args.mode
+
+    print(f"""
 +==============================================================+
-|       Eye Auto Tuner - 眼睛舵机调整工具                        |
+||       Eye Auto Tuner - 眼睛舵机调整工具                        |
 +==============================================================+
-|  功能: 引导式自动调整 (A10-A13 眼球)                         |
-|  流程: 采集60帧→去头尾求平均→关检测→移舵机→等1s→循环       |
-|  Keys: [Q/Esc] Stop                                         |
+||  功能: 引导式自动调整 ({'A10-A13 眼球' if mode == 'eyeball' else 'A8-A9 眼皮'})                         |
+||  流程: 采集60帧→去头尾求平均→关检测→移舵机→等1s→循环       |
+||  Keys: [Q/Esc] Stop                                         |
 +==============================================================+
 """)
 
@@ -497,17 +793,47 @@ def main():
     try:
         tuner.initialize()
 
-        # 启动引导式自动调整
-        passed, iterations, region_scores = tuner.auto_adjust(
-            pixel_to_degree=args.ratio,
-            max_iterations=args.max_iter,
-            wait_seconds=args.wait,
-        )
-
-        if passed:
-            print(f"\nDone! 调整通过，共 {iterations} 次迭代。")
+        if mode == "eyeball":
+            has_eyelid_bl = tuner.scorer.eyelid_baseline is not None
+            passed, iterations, _ = tuner.auto_adjust(
+                pixel_to_degree=args.ratio,
+                max_iterations=args.max_iter,
+                wait_seconds=args.wait,
+                keep_display=has_eyelid_bl,
+            )
+            if passed:
+                # 眼球通过 → 固定眼球，自动进入眼皮调整
+                print(f"\n[眼球完成] 共 {iterations} 次迭代，固定眼球舵机。")
+                if tuner.scorer.eyelid_baseline is None:
+                    print("[WARN] 未加载眼皮基线，跳过眼皮调整。")
+                else:
+                    print("\n>>> 自动进入眼皮调整 (A8-A9) ...\n")
+                    tuner._eyelid_a8_flip = 1 if args.eyelid_a8_flip else -1
+                    tuner._eyelid_a9_flip = -1 if args.eyelid_a9_flip else 1
+                    passed2, iter2, _ = tuner.auto_adjust_eyelid(
+                        ear_step=args.ear_step,
+                        max_iterations=args.eyelid_max_iter,
+                        wait_seconds=args.eyelid_wait,
+                    )
+                    if passed2:
+                        print(f"\nDone! 眼球+眼皮 调整完成 (眼球{iterations}次, 眼皮{iter2}次)。")
+                    else:
+                        print(f"\n眼球通过但眼皮未通过 (眼球{iterations}次, 眼皮{iter2}次)。")
+                    return
+            else:
+                print(f"\n调整未通过 (迭代 {iterations} 次)。")
         else:
-            print(f"\n调整未通过 (迭代 {iterations} 次)。")
+            tuner._eyelid_a8_flip = 1 if args.eyelid_a8_flip else -1
+            tuner._eyelid_a9_flip = -1 if args.eyelid_a9_flip else 1
+            passed, iterations, _ = tuner.auto_adjust_eyelid(
+                ear_step=args.ear_step,
+                max_iterations=args.eyelid_max_iter,
+                wait_seconds=args.eyelid_wait,
+            )
+            if passed:
+                print(f"\nDone! 调整通过，共 {iterations} 次迭代。")
+            else:
+                print(f"\n调整未通过 (迭代 {iterations} 次)。")
 
     except KeyboardInterrupt:
         print("\n\n[INTERRUPTED] 用户中断")

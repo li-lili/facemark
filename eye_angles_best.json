@@ -1,30 +1,30 @@
 {
   "description": "EyeAutoTuner 眼睛舵机角度配置",
-  "timestamp": "2026-06-08 14:43:59",
+  "timestamp": "2026-06-08 17:22:09",
   "servo_angles": {
     "A8": {
       "channel": 8,
-      "angle": 0
+      "angle": 136
     },
     "A9": {
       "channel": 9,
-      "angle": 0
+      "angle": 132
     },
     "A10": {
       "channel": 10,
-      "angle": 81
+      "angle": 73
     },
     "A11": {
       "channel": 11,
-      "angle": 195
+      "angle": 205
     },
     "A12": {
       "channel": 12,
-      "angle": 166
+      "angle": 170
     },
     "A13": {
       "channel": 13,
-      "angle": 104
+      "angle": 105
     }
   },
   "quick_apply": {
@@ -37,12 +37,12 @@
       13
     ],
     "angles": [
-      0,
-      0,
-      81,
-      195,
-      166,
-      104
+      136,
+      132,
+      73,
+      205,
+      170,
+      105
     ]
   }
 }

@@ -22,13 +22,30 @@ from expression_match import (
 )
 from eye_constants import (
     CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, FLIP_HORIZONTAL,
-    OPENNESS_IDEAL_MIN, OPENNESS_IDEAL_MAX,
-    IRIS_OFFSET_THRESHOLD,
-    # SYMMETRY_THRESHOLD,
-    SHAPE_CV_IDEAL,
-    GEOMETRY_WEIGHTS,
-    IRIS_CENTER_OUTWARD,
 )
+
+# ============================================================
+# 几何评分参数
+# ============================================================
+
+# 指标1: 眼睛开放度 — 高宽比理想区间
+OPENNESS_IDEAL_MIN = 0.57
+OPENNESS_IDEAL_MAX = 0.58
+
+# 指标2: 虹膜居中度 — 偏移占眼宽的阈值
+IRIS_OFFSET_THRESHOLD = 0.033
+
+# 虹膜质心外移补偿 (占眼宽的比例)
+IRIS_CENTER_OUTWARD = 0.05
+
+# 指标4: 形状规整度
+SHAPE_CV_IDEAL = 0.50
+
+# 综合得分权重
+GEOMETRY_WEIGHTS = {
+    "openness": 0.50,
+    "centered": 0.50,
+}
 
 
 # ============================================================
