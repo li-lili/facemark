@@ -24,8 +24,8 @@ EYEBALL_CHANNELS = [10, 11, 12, 13]  # A10-A13 眼球
 # ============================================================
 
 # 指标1: 眼睛开放度 — 高宽比理想区间
-OPENNESS_IDEAL_MIN = 0.61   # 正常眼睛高宽比下限
-OPENNESS_IDEAL_MAX = 0.62   # 正常眼睛高宽比上限
+OPENNESS_IDEAL_MIN = 0.57   # 正常眼睛高宽比下限
+OPENNESS_IDEAL_MAX = 0.58   # 正常眼睛高宽比上限
 
 # 指标2: 虹膜居中度 — 偏移占眼宽的阈值
 IRIS_OFFSET_THRESHOLD = 0.033  # 偏移 < 10%眼宽 → 满分

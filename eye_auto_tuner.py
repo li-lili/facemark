@@ -1,137 +1,61 @@
 """
-Eye Auto Tuner — 眼睛舵机自动参数优化适配器 (主入口)
-======================================================
-两阶段优化流程:
-  Phase 1: 眼皮 (A8/A9) → 目标开放度 ≥ least_score
-           单眼达标即锁定，只调另一只
-  Phase 2: 眼球 (A10-A13) → 目标综合得分 ≥ least_score
-           眼皮锁定，仅调整眼球
+Eye Auto Tuner — 眼睛舵机调整工具 (主入口)
+==========================================
+核心功能: 初始化硬件 + 发送舵机角度 + 采集检测 + 保存结果
 
 模块结构:
   eye_constants.py   - 常量 + TuningResult 数据类
-  eye_scorer.py      - 摄像头采集 + 面部评分 (EyeScoreCalculator)
-  eye_strategies.py  - 优化算法 (CoordinateDescentStrategy)
-  eye_auto_tuner.py  - 主编排器 + CLI 入口 (本文件)
+  ellseg_scorer.py   - 摄像头采集 + EllSeg虹膜偏移检测 (EllSegDetector)
+
+检测方式:
+  用 EllSeg 检测虹膜位置，与基线对比计算像素偏移。
+  合格条件: 双眼虹膜偏移均 ≤ TOLERANCE(2px)。
+  判定标准: 规定帧数内，≥50% 帧合格则通过。
 """
 
 import os
 import time
 import json
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from Motor import FaceController
 from Communication import UARTDevice
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
-    EYELID_CHANNELS, EYEBALL_CHANNELS,
-    DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX, DEFAULT_ANGLE_STEP,
+    EYEBALL_CHANNELS,
+    DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX,
+    CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, FLIP_HORIZONTAL,
     TuningResult,
 )
-from eye_scorer import EyeScoreCalculator
-from eye_strategies import CoordinateDescentStrategy
-import cv2
+from ellseg_scorer import EllSegDetector, TOLERANCE
+
+# 眼球舵机名称 (A10-A13)
+EYEBALL_NAMES = [f"A{ch}" for ch in EYEBALL_CHANNELS]
 
 
 class EyeAutoTuner:
-    """眼睛舵机自动参数优化适配器（主编排器）"""
+    """眼睛舵机调整工具"""
 
     def __init__(
         self,
         yaml_file: str = "29_servo_config(13).yaml",
         port: str = "COM5",
         baudrate: int = 115200,
-        strategy: str = "coordinate",
         servo_num: int = 27,
-        max_iterations: int = 150,
-        angle_min: int = DEFAULT_ANGLE_MIN,
-        angle_max: int = DEFAULT_ANGLE_MAX,
-        angle_step: int = DEFAULT_ANGLE_STEP,
         stabilize_frames: int = 8,
         settle_time_ms: int = 300,
-        show_preview: bool = True,
-        auto_save: bool = True,
-        target_score: float = 95.0,
     ):
         self.yaml_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), yaml_file)
         self.port = port
         self.baudrate = baudrate
-        self.strategy_name = strategy.lower()
         self.servo_num = servo_num
-        self.max_iterations = max_iterations
         self.stabilize_frames = stabilize_frames
         self.settle_time_ms = settle_time_ms
-        self.show_preview = show_preview
-        self.auto_save = auto_save
-        self.target_score = target_score
-
-        # 舵机角度范围（initialize 时从 yaml 覆盖）
-        self.angle_ranges = [(angle_min, angle_max)] * len(EYE_SERVO_CHANNELS)
-        self.angle_step = angle_step
 
         # 组件引用（延迟初始化）
         self.controller = None
         self.scorer = None
-
-        # 运行标志
-        self._running = False
-        self._stopped_by_user = False
-
-    # ==================================================================
-    # 配置加载
-    # ==================================================================
-
-    def _load_servo_defaults(self, config_file: str = "eyelid_tuner_config.json"):
-        """从配置文件加载舵机经验默认值 + 总控制开关
-
-        配置结构:
-          servo_defaults:
-            eyelid: { center_ratio, window_ratio, max_iterations, least_score }
-            eyeball: { center_ratio, window_ratio, max_iterations, least_score }
-            A10:     { center_ratio, window_ratio }   # 单通道覆盖
-
-        max_iterations:
-          -1 = 必须达标才停止 (搜索空间遍历后自动重置)
-           0 = 使用全局默认 max_iterations
-          >0 = 该阶段最大迭代次数
-        """
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config_file)
-        defaults = {
-            "eyelid": {
-                "center_ratio": 0.85, "window_ratio": 0.05,
-                "max_iterations": 0, "least_score": 99.0,
-            },
-            "eyeball": {
-                "center_ratio": 0.50, "window_ratio": 0.15,
-                "max_iterations": 0, "least_score": 95.0,
-            },
-        }
-        auto_adjust = True
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if "servo_defaults" in cfg:
-                for key, val in cfg["servo_defaults"].items():
-                    if key in defaults:
-                        defaults[key].update(val)
-                    else:
-                        defaults[key] = dict(val)
-            if "auto_adjust" in cfg:
-                auto_adjust = bool(cfg["auto_adjust"])
-            print(f"[INFO] 舵机经验参数已从 {config_file} 加载")
-            print(f"[INFO] 自动调整: {'开启' if auto_adjust else '关闭 (仅采集模式)'}")
-        except FileNotFoundError:
-            print(f"[WARN] 配置文件未找到: {config_path}，使用内置默认值，自动调整=开")
-        return defaults, auto_adjust
-
-    @staticmethod
-    def _resolve_max_iter(raw_value: int, global_default: int) -> int:
-        """解析 max_iterations: -1=不限, 0=用全局默认, >0=指定值"""
-        if raw_value == -1:
-            return -1
-        elif raw_value == 0:
-            return global_default
-        else:
-            return raw_value
+        self.angle_ranges = [(DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX)] * len(EYE_SERVO_CHANNELS)
 
     # ==================================================================
     # 初始化
@@ -140,90 +64,47 @@ class EyeAutoTuner:
     def initialize(self):
         """初始化所有硬件和模型"""
         print("=" * 60)
-        print("  EyeAutoTuner - 眼睛舵机自动优化适配器")
+        print("  EyeAutoTuner - 眼睛舵机调整工具")
         print("=" * 60)
 
-        self.servo_defaults, self.auto_adjust = self._load_servo_defaults()
-        eyelid_ratio = self.servo_defaults["eyelid"]["center_ratio"]
-        eyelid_window = self.servo_defaults["eyelid"]["window_ratio"]
-        eyeball_ratio = self.servo_defaults["eyeball"]["center_ratio"]
-        eyeball_window = self.servo_defaults["eyeball"]["window_ratio"]
-
         # 1. 初始化舵机控制器
-        print("\n[1/3] 初始化舵机控制器...")
+        print("\n[1/2] 初始化舵机控制器...")
         interface = UARTDevice(self.port, self.baudrate)
         self.controller = FaceController(interface, self.servo_num, self.yaml_file)
         self.controller.open()
         self.controller.init_data()
 
-        # 计算每个眼睛舵机的搜索范围
-        print("\n    眼睛舵机 (A8-A13) 搜索范围:")
+        # 计算每个眼睛舵机的范围
+        print("\n    眼睛舵机 (A8-A13) 范围:")
         for i, ch in enumerate(EYE_SERVO_CHANNELS):
             start = self.controller.list_start_deg[ch]
             end = self.controller.list_end_deg[ch]
-            full_lo = min(start, end)
-            full_hi = max(start, end)
-            span = float(full_hi - full_lo)
+            lo = min(start, end)
+            hi = max(start, end)
+            self.angle_ranges[i] = (lo, hi)
+            center = round(start + (end - start) * 0.5)
+            print(f"    A{ch} ({EYE_SERVO_NAMES[i]}): range=[{lo}, {hi}] center={center}°")
 
-            ch_key = f"A{ch}"
-            if ch_key in self.servo_defaults:
-                ch_cfg = self.servo_defaults[ch_key]
-                ratio = ch_cfg.get("center_ratio", eyeball_ratio)
-                window_ratio = ch_cfg.get("window_ratio", eyeball_window)
-                tag = f"{ch_key}@{int(ratio*100)}%±{int(window_ratio*100)}%"
-            elif ch in EYELID_CHANNELS:
-                ratio = eyelid_ratio
-                window_ratio = eyelid_window
-                tag = f"眼皮@{int(ratio*100)}%±{int(window_ratio*100)}%"
-            else:
-                ratio = eyeball_ratio
-                window_ratio = eyeball_window
-                tag = f"眼球@{int(ratio*100)}%±{int(window_ratio*100)}%"
-
-            center = start + (end - start) * ratio
-            half_window = span * window_ratio
-            search_lo = round(center - half_window)
-            search_hi = round(center + half_window)
-
-            self.angle_ranges[i] = (search_lo, search_hi)
-            print(f"    A{ch} ({EYE_SERVO_NAMES[i]}): "
-                  f"range=[{start}→{end}] 中心={center:.1f}° "
-                  f"搜索[{search_lo:3d},{search_hi:3d}] ({tag})")
-
-        # 全量舵机状态
-        self.full_angles = self.controller.list_temp_deg[:self.controller.servo_num].copy()
-
-        # 经验最佳中心值
-        self.initial_center = []
-        for i, ch in enumerate(EYE_SERVO_CHANNELS):
-            start = self.controller.list_start_deg[ch]
-            end = self.controller.list_end_deg[ch]
-            ch_key = f"A{ch}"
-            if ch_key in self.servo_defaults:
-                ratio = self.servo_defaults[ch_key].get("center_ratio", eyeball_ratio)
-            else:
-                ratio = eyelid_ratio if ch in EYELID_CHANNELS else eyeball_ratio
-            self.initial_center.append(round(start + (end - start) * ratio))
-
-        print(f"\n    经验起点: {dict(zip(EYE_SERVO_NAMES, self.initial_center))}")
-
-        # 2. 初始化评分器
-        print("\n[2/3] 初始化面部检测与评分系统...")
-        self.scorer = EyeScoreCalculator()
-
-        # 3. 就绪
-        print(f"\n[3/3] 优化策略: 坐标下降法 (步长={self.angle_step})")
+        # 2. 初始化 EllSeg 虹膜检测器 (必须与标定基线时分辨率一致: 1920x1080)
+        print("\n[2/2] 初始化 EllSeg 虹膜检测系统...")
+        self.scorer = EllSegDetector(
+            camera_index=CAMERA_INDEX,
+            width=1920,
+            height=1080,
+            flip_horizontal=FLIP_HORIZONTAL,
+            stabilize_frames=self.stabilize_frames,
+        )
 
         print("\n" + "=" * 60)
-        print("  初始化完成！按 [Q] 可随时停止优化")
+        print("  初始化完成！")
         print("=" * 60 + "\n")
 
     # ==================================================================
-    # 硬件操作
+    # 舵机操作
     # ==================================================================
 
-    def _send_servo(self, channel: int, angle: int,
-                    angle_range: Tuple[int, int] = None):
+    def send_servo(self, channel: int, angle: int,
+                   angle_range: Tuple[int, int] = None):
         """发送单个舵机角度，自动 clamp 到范围"""
         if angle_range:
             angle = max(angle_range[0], min(angle_range[1], angle))
@@ -231,552 +112,307 @@ class EyeAutoTuner:
             [angle], [channel], 200, servo_num=self.controller.servo_num
         )
 
-    def _send_servos(self, channels: List[int], angles: List[int],
-                     angle_ranges: List[Tuple[int, int]] = None):
+    def send_servos(self, channels: List[int], angles: List[int],
+                    angle_ranges: List[Tuple[int, int]] = None):
         """发送多个舵机角度"""
-        for i, (ch, ang) in enumerate(zip(channels, angles)):
-            ar = angle_ranges[i] if angle_ranges else None
-            self._send_servo(ch, ang, ar)
+        for ch, ang in zip(channels, angles):
+            idx = channels.index(ch) if angle_ranges else None
+            ar = angle_ranges[idx] if (angle_ranges and idx is not None) else None
+            self.send_servo(ch, ang, ar)
 
-    def _capture_score(self):
-        """等待舵机稳定后采集评分"""
+    def capture_and_score(self):
+        """等待舵机稳定后采集检测（EllSeg 虹膜偏移）"""
         time.sleep(self.settle_time_ms / 1000.0)
         return self.scorer.capture_and_score(
             stabilize_frames=self.stabilize_frames,
-            show_preview=self.show_preview
         )
 
-    def _check_stop_key(self) -> bool:
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord('q'), ord('Q'), 27):
-            print("\n[USER] 收到停止信号...")
-            return True
-        return False
-
     # ==================================================================
-    # Phase 1: 眼皮优化 (A8/A9) — 单眼达标即锁定
+    # 多帧采集 + 修剪平均
     # ==================================================================
 
-    def _run_phase1_eyelid(self) -> Tuple[List[int], float, float, int]:
+    def collect_guide_samples(self, n_frames: int = 60, trim: int = 10):
         """
-        Phase 1: 眼皮优化
+        打开 MP + EllSeg → 采集 n 帧偏移 → 关闭 → 修剪平均。
+
+        流程:
+          1. 开启 MP 和 EllSeg 检测
+          2. 连续采集 n_frames 帧有效引导信号
+          3. 关闭 MP 和 EllSeg
+          4. 按 total_dist 排序，去掉最高的 trim 帧和最低的 trim 帧
+          5. 对中间帧求平均值
+          6. 返回平均偏移信号（结构兼容 get_guide_signal）
 
         Returns:
-            (best_eyelid_angles, best_l_open, best_r_open, eyelid_iter)
+            dict 或 None: 平均后的引导信号
         """
-        eyelid_cfg = self.servo_defaults["eyelid"]
-        eyelid_least = eyelid_cfg.get("least_score", 99.0)
-        eyelid_max_iter = self._resolve_max_iter(
-            eyelid_cfg.get("max_iterations", 0), self.max_iterations)
+        # ---- 1. 开启检测 ----
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = True
 
-        print(f"{'='*60}")
-        print(f"  Phase 1: 眼皮优化 (A8/A9) | 单眼达标即锁定")
-        print(f"  目标: L_Openness ≥ {eyelid_least}% 且 R_Openness ≥ {eyelid_least}%")
-        if eyelid_max_iter == -1:
-            print(f"  迭代: 不限 (必须达标才进入 Phase 2)")
-        else:
-            print(f"  最大迭代: {eyelid_max_iter}")
-        print(f"{'='*60}\n")
+        samples = []  # list of (total_dist, offsets_dict)
+        collected = 0
+        no_face_count = 0
 
-        # 发送经验起点
-        eyelid_ranges = self.angle_ranges[:2]
-        eyelid_angles = list(self.initial_center[:2])
-        self._send_servos(EYELID_CHANNELS, eyelid_angles, eyelid_ranges)
-        time.sleep(1.5)
-
-        # 追踪各眼最佳分数和角度
-        best_l_open = 0.0
-        best_r_open = 0.0
-        best_l_angle = eyelid_angles[0]
-        best_r_angle = eyelid_angles[1]
-        l_locked = False
-        r_locked = False
-        eyelid_iter = 0
-        reset_count = 0
-
-        def create_optimizer(active_indices):
-            """为活跃通道创建优化器，用各通道历史最佳角度作为起点"""
-            chs = [EYELID_CHANNELS[i] for i in active_indices]
-            ranges = [eyelid_ranges[i] for i in active_indices]
-            center = [best_l_angle if i == 0 else best_r_angle for i in active_indices]
-            return CoordinateDescentStrategy(
-                chs, ranges, self.angle_step, initial_center=center
-            ), chs, ranges
-
-        active = [0, 1]
-        optimizer, active_chs, active_ranges = create_optimizer(active)
-
-        while self._running and not (l_locked and r_locked):
-            combination = optimizer.get_next_combination()
-
-            if combination is None:
-                # 搜索空间遍历完
-                all_met = best_l_open >= eyelid_least and best_r_open >= eyelid_least
-                if eyelid_max_iter == -1 and not all_met:
-                    reset_count += 1
-                    not_met = []
-                    if best_l_open < eyelid_least:
-                        not_met.append(f"L={best_l_open:.1f}%")
-                    if best_r_open < eyelid_least:
-                        not_met.append(f"R={best_r_open:.1f}%")
-                    print(f"\n[INFO] Phase 1 搜索空间遍历 (第{reset_count}轮), "
-                          f"未达标 {' '.join(not_met)}, 重置优化器继续")
-                    # 恢复到历史最佳角度
-                    eyelid_angles[0] = best_l_angle
-                    eyelid_angles[1] = best_r_angle
-                    for idx, ch in enumerate(EYELID_CHANNELS):
-                        if (idx == 0 and not l_locked) or (idx == 1 and not r_locked):
-                            self._send_servo(ch, eyelid_angles[idx], eyelid_ranges[idx])
-                    optimizer, active_chs, active_ranges = create_optimizer(active)
-                    continue
-                print("\n[INFO] Phase 1 搜索空间已完全遍历")
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
                 break
 
-            if self._check_stop_key():
-                self._stopped_by_user = True
-                break
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
 
-            eyelid_iter += 1
+            self.scorer.detect(frame)
+            signal = self.scorer.get_guide_signal()
 
-            # 移动活跃通道舵机
-            for j, (channel, angle) in enumerate(zip(active_chs, combination)):
-                clamped = max(active_ranges[j][0], min(active_ranges[j][1], angle))
-                idx = EYELID_CHANNELS.index(channel)
-                eyelid_angles[idx] = clamped
-                self._send_servo(channel, clamped)
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:  # 连续10帧无脸 → 放弃
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
 
-            # 打分
-            _, region_scores = self._capture_score()
-            l_open = region_scores.get("L_Openness", 0.0)
-            r_open = region_scores.get("R_Openness", 0.0)
+            offsets = {
+                "L_dX": signal.get("L_dX", 0),
+                "L_dY": signal.get("L_dY", 0),
+                "L_dist": signal.get("L_dist", 0),
+                "R_dX": signal.get("R_dX", 0),
+                "R_dY": signal.get("R_dY", 0),
+                "R_dist": signal.get("R_dist", 0),
+            }
+            total_dist = offsets["L_dist"] + offsets["R_dist"]
+            samples.append((total_dist, offsets))
+            collected += 1
 
-            # 更新最佳
-            l_improved = (not l_locked) and (l_open > best_l_open)
-            r_improved = (not r_locked) and (r_open > best_r_open)
-            if l_improved:
-                best_l_open = l_open
-                best_l_angle = eyelid_angles[0]
-            if r_improved:
-                best_r_open = r_open
-                best_r_angle = eyelid_angles[1]
+            self.scorer.update_hud([
+                (f"Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
 
-            # 日志
-            if l_improved or r_improved:
-                lock_str = (" [L已锁]" if l_locked else "") + (" [R已锁]" if r_locked else "")
-                print(f"  ★ [P1 Iter {eyelid_iter:3d}] "
-                      f"L_Opn={l_open:.1f}% R_Opn={r_open:.1f}% "
-                      f"| A8={eyelid_angles[0]}° A9={eyelid_angles[1]}°{lock_str}")
-            elif eyelid_iter % 10 == 0:
-                print(f"    [P1 Iter {eyelid_iter:3d}] "
-                      f"L_Opn={l_open:.1f}% R_Opn={r_open:.1f}% "
-                      f"(Best: L={best_l_open:.1f}% R={best_r_open:.1f}%)")
+        # ---- 2. 关闭检测 ----
+        self.scorer.enable_mp = False
+        self.scorer.enable_ellseg = False
 
-            # 反馈: 只用活跃眼的分数
-            if l_locked and not r_locked:
-                feedback_score = r_open
-            elif r_locked and not l_locked:
-                feedback_score = l_open
-            else:
-                feedback_score = (l_open + r_open) / 2.0
-            optimizer.update_feedback(combination, feedback_score)
+        if len(samples) < 2 * trim + 1:
+            print(f"  [Collect] 有效样本不足: {len(samples)}, 需要 ≥ {2*trim+1}")
+            return None
 
-            # 检查单眼达标 → 锁定
-            need_rebuild = False
-            if not l_locked and l_open >= eyelid_least:
-                l_locked = True
-                print(f"  ► 左眼皮达标! L_Opn={l_open:.1f}% ≥ {eyelid_least}% "
-                      f"→ A8={eyelid_angles[0]}° 已锁定")
-                need_rebuild = True
-            if not r_locked and r_open >= eyelid_least:
-                r_locked = True
-                print(f"  ► 右眼皮达标! R_Opn={r_open:.1f}% ≥ {eyelid_least}% "
-                      f"→ A9={eyelid_angles[1]}° 已锁定")
-                need_rebuild = True
+        # ---- 3. 排序 + 修剪 ----
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
 
-            if l_locked and r_locked:
-                print(f"\n{'='*60}")
-                print(f"  ★★ Phase 1 达标! 双眼均已锁定")
-                print(f"      L_Opn={best_l_open:.1f}%  R_Opn={best_r_open:.1f}%")
-                print(f"      A8={best_l_angle}°  A9={best_r_angle}°")
-                print(f"{'='*60}\n")
-                break
+        # ---- 4. 平均 ----
+        n = len(trimmed)
+        avg = {}
+        for key in ["L_dX", "L_dY", "L_dist", "R_dX", "R_dY", "R_dist"]:
+            avg[key] = sum(s[1][key] for s in trimmed) / n
+        # 反方向 = 舵机调整方向
+        avg["L_adj_X"] = -avg["L_dX"]
+        avg["L_adj_Y"] = -avg["L_dY"]
+        avg["R_adj_X"] = -avg["R_dX"]
+        avg["R_adj_Y"] = -avg["R_dY"]
+        avg["total_dist"] = avg["L_dist"] + avg["R_dist"]
 
-            # 某只眼锁定后，重建优化器只调另一只
-            if need_rebuild:
-                active = []
-                if not l_locked:
-                    active.append(0)
-                if not r_locked:
-                    active.append(1)
-                if active:
-                    optimizer, active_chs, active_ranges = create_optimizer(active)
-                    active_names = ['A8' if i == 0 else 'A9' for i in active]
-                    print(f"  >> 重建优化器, 活跃通道: {active_names}")
+        # 统计
+        all_dists = [s[0] for s in samples]
+        print(f"  [Collect] {len(samples)} frames, trim {trim}: "
+              f"avg_dist={avg['total_dist']:.1f}px "
+              f"(min={all_dists[0]:.1f}, max={all_dists[-1]:.1f})")
 
-            if eyelid_max_iter > 0 and eyelid_iter >= eyelid_max_iter:
-                print(f"\n[WARN] Phase 1 达到最大迭代 {eyelid_max_iter}")
-                break
-
-        # 用历史最佳角度（而非最后一次尝试的角度）
-        best_eyelid_angles = [best_l_angle, best_r_angle]
-        self._send_servos(EYELID_CHANNELS, best_eyelid_angles, eyelid_ranges)
-        for i, ch in enumerate(EYELID_CHANNELS):
-            self.full_angles[ch] = best_eyelid_angles[i]
-        print(f"  >> 眼皮锁定: A8={best_eyelid_angles[0]}°  A9={best_eyelid_angles[1]}°  "
-              f"(L_Opn={best_l_open:.1f}%  R_Opn={best_r_open:.1f}%)\n")
-
-        return best_eyelid_angles, best_l_open, best_r_open, eyelid_iter
+        return avg
 
     # ==================================================================
-    # Phase 2: 眼球优化 (A10-A13)
+    # 引导式自动调整: 采集60帧取平均 → 移动眼球(A10-A13) → 等1s → 循环
     # ==================================================================
 
-    def _run_phase2_eyeball(self, best_eyelid_angles: List[int]) -> Tuple[List[int], float, dict, int]:
+    def auto_adjust(
+        self,
+        pixel_to_degree: float = 2.0,
+        max_iterations: int = 50,
+        wait_seconds: float = 1.0,
+    ) -> Tuple[bool, int, dict]:
         """
-        Phase 2: 眼球优化（眼皮已锁定）
+        引导式自动调整 — 只调整 A10-A13 眼球舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP + EllSeg
+          2. 采集 60 帧 → 去最高/最低各 10 帧 → 中间 40 帧求平均偏移
+          3. 关闭 MP + EllSeg
+          4. 若平均偏移 ≤ TOLERANCE → 通过
+          5. 否则按平均偏移方向移动舵机 → 等待 → 下一轮
+
+        Args:
+            pixel_to_degree:   像素→角度换算系数
+            max_iterations:    最大循环次数
+            wait_seconds:      每次移动后等待秒数
 
         Returns:
-            (best_eyeball_angles, best_eye_score, best_region_scores, eyeball_iter)
+            (passed: bool, iterations: int, final_region_scores: dict)
         """
-        eyeball_cfg = self.servo_defaults["eyeball"]
-        eyeball_least = eyeball_cfg.get("least_score", 95.0)
-        eyeball_max_iter = self._resolve_max_iter(
-            eyeball_cfg.get("max_iterations", 0), self.max_iterations)
+        if self.scorer.baseline is None:
+            print("[WARN] 未加载基线! 请先运行 ellseg_scorer.py 按 [S] 保存基线到 face_points.json")
+            return False, 0, {}
 
         print(f"{'='*60}")
-        print(f"  Phase 2: 眼球优化 (A10-A13) | 目标综合得分 ≥ {eyeball_least}%")
-        print(f"  眼皮锁定: A8={best_eyelid_angles[0]}°  A9={best_eyelid_angles[1]}°")
-        if eyeball_max_iter == -1:
-            print(f"  迭代: 不限 (必须达标才停止)")
-        else:
-            print(f"  最大迭代: {eyeball_max_iter}")
+        print(f"  引导式自动调整 (仅眼球 A10-A13)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均")
+        print(f"  系数: {pixel_to_degree} °/px | 最大迭代: {max_iterations} | "
+              f"等待: {wait_seconds}s")
+        print(f"  目标: 平均偏移 ≤ {TOLERANCE}px")
         print(f"{'='*60}\n")
 
-        eyeball_ranges = self.angle_ranges[2:]
-        eyeball_center = self.initial_center[2:]
+        self.scorer.start_display()
 
-        # 发送经验中心到眼球舵机
-        self._send_servos(EYEBALL_CHANNELS, eyeball_center, eyeball_ranges)
-        time.sleep(1.0)
+        current_angles = {ch: self.controller.list_temp_deg[ch] for ch in EYEBALL_CHANNELS}
+        print(f"  初始角度: {dict(zip(EYEBALL_NAMES, [current_angles[c] for c in EYEBALL_CHANNELS]))}")
 
-        eyeball_optimizer = CoordinateDescentStrategy(
-            EYEBALL_CHANNELS, eyeball_ranges, self.angle_step,
-            initial_center=eyeball_center
-        )
+        iteration = 0
+        sleep_chunk = 0.1
 
-        best_eyeball_angles = eyeball_center.copy()
-        best_eye_score = -float('inf')
-        best_region_scores = {}
-        eyeball_iter = 0
-        eyeball_reset_count = 0
+        try:
+            while iteration < max_iterations:
+                iteration += 1
 
-        while self._running:
-            combination = eyeball_optimizer.get_next_combination()
-            if combination is None:
-                if eyeball_max_iter == -1 and best_eye_score < eyeball_least:
-                    eyeball_reset_count += 1
-                    print(f"\n[INFO] Phase 2 搜索空间遍历 (第{eyeball_reset_count}轮), "
-                          f"未达标 Avg={best_eye_score:.1f}% < {eyeball_least}%, 重置优化器继续")
-                    eyeball_optimizer = CoordinateDescentStrategy(
-                        EYEBALL_CHANNELS, eyeball_ranges, self.angle_step,
-                        initial_center=best_eyeball_angles
-                    )
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 步骤 1+2: 采集60帧 → 修剪平均 ----
+                avg_signal = self.collect_guide_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    self.scorer.update_hud([
+                        (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
+                    ])
+                    print(f"  [Iter {iteration:3d}] 无法获取有效帧")
+
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
                     continue
-                print("\n[INFO] Phase 2 搜索空间已完全遍历")
-                break
 
-            if self._check_stop_key():
-                self._stopped_by_user = True
-                break
+                l_dx = avg_signal["L_dX"]
+                l_dy = avg_signal["L_dY"]
+                r_dx = avg_signal["R_dX"]
+                r_dy = avg_signal["R_dY"]
+                l_dist = avg_signal["L_dist"]
+                r_dist = avg_signal["R_dist"]
 
-            eyeball_iter += 1
+                # ---- 步骤 3: 已关闭 MP/EllSeg (collect_guide_samples 已关) ----
 
-            # 仅移动 A10-A13
-            for i, (channel, angle) in enumerate(zip(EYEBALL_CHANNELS, combination)):
-                clamped = max(eyeball_ranges[i][0], min(eyeball_ranges[i][1], angle))
-                self._send_servo(channel, clamped)
+                # ---- 步骤 4: 检查是否已合格 ----
+                qualified = (l_dist <= TOLERANCE and r_dist <= TOLERANCE)
 
-            # 打分
-            eye_score, region_scores = self._capture_score()
+                dist_s = f"L={l_dist:.1f}px R={r_dist:.1f}px"
+                print(f"  [Iter {iteration:3d}] 平均偏移: {dist_s} | "
+                      f"L(dX={l_dx:+.1f} dY={l_dy:+.1f}) "
+                      f"R(dX={r_dx:+.1f} dY={r_dy:+.1f})")
 
-            if eye_score > best_eye_score:
-                best_eye_score = eye_score
-                best_eyeball_angles = combination.copy()
-                best_region_scores = region_scores
-                angles_str = " ".join([f"{n}={a}°" for n, a in
-                                       zip(["A10", "A11", "A12", "A13"], combination)])
-                print(f"  ★ [P2 Iter {eyeball_iter:3d}] NEW BEST! "
-                      f"Total={eye_score:.1f}% | {angles_str}")
-            elif eyeball_iter % 10 == 0:
-                print(f"    [P2 Iter {eyeball_iter:3d}] "
-                      f"Total={eye_score:.1f}% (Best: {best_eye_score:.1f}%)")
+                if qualified:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 通过! 共迭代 {iteration} 次")
+                    print(f"      平均偏移: L={l_dist:.1f}px R={r_dist:.1f}px")
+                    final_ang = " ".join([f"{n}={current_angles[c]}°"
+                                         for n, c in zip(EYEBALL_NAMES, EYEBALL_CHANNELS)])
+                    print(f"      角度: {final_ang}")
+                    print(f"{'='*60}\n")
 
-            eyeball_optimizer.update_feedback(combination, eye_score)
+                    all_angles = [current_angles.get(ch, 0) for ch in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    self.export_angle_config(all_angles)
 
-            if best_eye_score >= eyeball_least:
-                print(f"\n{'='*60}")
-                print(f"  ★★ Phase 2 达标! 综合得分={best_eye_score:.1f}% >= {eyeball_least}%")
-                print(f"{'='*60}\n")
-                break
+                    self.scorer.update_hud([("★★ PASSED ★★", (120, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, {}
 
-            if eyeball_max_iter > 0 and eyeball_iter >= eyeball_max_iter:
-                print(f"\n[WARN] Phase 2 达到最大迭代 {eyeball_max_iter}")
-                break
+                # ---- 步骤 5: 按平均偏移移动舵机 ----
+                l_adj_x = avg_signal["L_adj_X"]
+                r_adj_x = avg_signal["R_adj_X"]
+                l_adj_y = avg_signal["L_adj_Y"]
+                r_adj_y = avg_signal["R_adj_Y"]
 
-        # 应用最佳眼球角度
-        self._send_servos(EYEBALL_CHANNELS, best_eyeball_angles, eyeball_ranges)
-        print(f"  >> 眼球锁定: "
-              + " ".join([f"{n}={a}°" for n, a in
-                          zip(["A10", "A11", "A12", "A13"], best_eyeball_angles)])
-              + f"  (Score={best_eye_score:.1f}%)\n")
+                # A10: L_vertical 上下 (减=下)  |  A11: R_vertical 上下 (减=下, 物理反向)
+                # A12: L_horizontal 内外 (减=外) |  A13: R_horizontal 内外 (减=外, 物理反向)
+                adj_map = {
+                    EYEBALL_CHANNELS[0]:  1.0 if l_adj_y < 0 else (-1.0 if l_adj_y > 0 else 0.0),
+                    EYEBALL_CHANNELS[1]: -1.0 if r_adj_y < 0 else ( 1.0 if r_adj_y > 0 else 0.0),
+                    EYEBALL_CHANNELS[2]: -1.0 if l_adj_x < 0 else ( 1.0 if l_adj_x > 0 else 0.0),
+                    EYEBALL_CHANNELS[3]: -1.0 if r_adj_x < 0 else ( 1.0 if r_adj_x > 0 else 0.0),
+                }
 
-        return best_eyeball_angles, best_eye_score, best_region_scores, eyeball_iter
+                moved = []
+                for idx, ch in enumerate(EYEBALL_CHANNELS):
+                    delta = adj_map[ch]
+                    if delta == 0:
+                        continue
+                    new_angle = round(current_angles[ch] + delta)
+                    lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
+                    new_angle = max(lo, min(hi, new_angle))
+                    self.send_servo(ch, new_angle, (lo, hi))
+                    current_angles[ch] = new_angle
+                    moved.append(f"{EYEBALL_NAMES[idx]}={new_angle}°(Δ{delta:+.1f})")
 
-    # ==================================================================
-    # 主运行入口
-    # ==================================================================
+                if not moved:
+                    print(f"  [Iter {iteration:3d}] 无需移动 (偏移为0)")
+                else:
+                    print(f"  [Iter {iteration:3d}] 舵机移动: {' '.join(moved)}")
 
-    def run(self) -> Optional[TuningResult]:
-        """
-        两阶段自动优化: 先眼皮 → 再眼球
+                # ---- 步骤 6: 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
 
-        Phase 1: 仅调整 A8/A9 (眼皮), 目标开放度 ≥ eyelid.least_score
-        Phase 2: 锁定眼皮, 仅调整 A10-A13 (眼球), 目标综合得分 ≥ eyeball.least_score
-        """
-        try:
-            self.initialize()
-            self._running = True
-            self._stopped_by_user = False
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
 
-            if not self.auto_adjust:
-                return self._run_monitor_mode("full")
-
-            # 发送所有经验起点到硬件
-            eye_display = ", ".join(
-                [f"{n}={a}°" for n, a in zip(EYE_SERVO_NAMES, self.initial_center)])
-            print(f"\n  >> [初始化] 发送经验起点到舵机: [{eye_display}]")
-            self._send_servos(EYE_SERVO_CHANNELS, self.initial_center, self.angle_ranges)
-            print("  >> [初始化] 等待舵机到位 (1.5s)...\n")
-            time.sleep(1.5)
-
-            # ---- Phase 1: 眼皮 ----
-            best_eyelid_angles, best_l_open, best_r_open, eyelid_iter = \
-                self._run_phase1_eyelid()
-
-            eyelid_least = self.servo_defaults["eyelid"].get("least_score", 99.0)
-
-            if self._stopped_by_user:
-                avg_score = (best_l_open + best_r_open) / 2.0
-                return self._make_partial_result(
-                    best_eyelid_angles, [90, 90, 90, 90],
-                    avg_score, eyelid_iter,
-                    {"L_Openness": best_l_open, "R_Openness": best_r_open}
-                )
-
-            # 眼皮未达标 → 不进 Phase 2
-            if not (best_l_open >= eyelid_least and best_r_open >= eyelid_least):
-                avg_score = (best_l_open + best_r_open) / 2.0
-                not_met = []
-                if best_l_open < eyelid_least:
-                    not_met.append(f"L_Opn={best_l_open:.1f}%")
-                if best_r_open < eyelid_least:
-                    not_met.append(f"R_Opn={best_r_open:.1f}%")
-                print(f"\n{'='*60}")
-                print(f"  ✘ Phase 1 未达标! {' '.join(not_met)} < {eyelid_least}%")
-                print(f"    不进入 Phase 2 (眼球优化)")
-                print(f"{'='*60}\n")
-
-                best_angles_all = best_eyelid_angles + [90, 90, 90, 90]
-                result = TuningResult(
-                    best_angles=best_angles_all,
-                    best_score=avg_score,
-                    best_eye_score=avg_score,
-                    iteration=eyelid_iter,
-                    total_iterations=eyelid_iter,
-                    score_history=[],
-                    region_scores={"L_Openness": best_l_open, "R_Openness": best_r_open},
-                )
-                self._save_result(result)
-                return result
-
-            # ---- Phase 2: 眼球 ----
-            best_eyeball_angles, best_eye_score, best_region_scores, eyeball_iter = \
-                self._run_phase2_eyeball(best_eyelid_angles)
-
-            # ---- 合并结果 ----
-            best_angles_all = best_eyelid_angles + best_eyeball_angles
-            total_iter = eyelid_iter + eyeball_iter
-            eyeball_least = self.servo_defaults["eyeball"].get("least_score", 95.0)
-
-            result = TuningResult(
-                best_angles=best_angles_all,
-                best_score=best_eye_score,
-                best_eye_score=best_eye_score,
-                iteration=total_iter,
-                total_iterations=total_iter,
-                score_history=[],
-                region_scores=best_region_scores,
-            )
-
-            self._print_two_phase_report(
-                result,
-                eyelid_iter, best_l_open, best_r_open, best_eyelid_angles,
-                eyeball_iter, best_eye_score, best_eyeball_angles,
-                eyelid_least, eyeball_least,
-            )
-
-            self._save_result(result)
-            self._export_angle_config(result.best_angles)
-
-            # 应用最终最佳角度
-            if self.controller:
-                eye_display = ", ".join(
-                    [f"{n}={a}°" for n, a in zip(EYE_SERVO_NAMES, best_angles_all)])
-                print(f"\n  >> [最终] 写入最佳角度: [{eye_display}]")
-                self._send_servos(EYE_SERVO_CHANNELS, best_angles_all, self.angle_ranges)
-                print("  >> [最终] 舵机已定位到最佳角度！\n")
-
-            return result
-
-        except KeyboardInterrupt:
-            print("\n\n[INTERRUPTED] 用户中断了优化过程")
-            return None
-        except Exception as e:
-            print(f"\n[ERROR] 优化过程中出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
         finally:
-            self.cleanup()
+            self.scorer.stop_display()
 
-    def run_eyelid_phase(self) -> Optional[TuningResult]:
-        """仅眼皮调优模式 (A8/A9)"""
-        try:
-            self.initialize()
-            self._running = True
-            self._stopped_by_user = False
-
-            # 发送经验起点
-            eyelid_ranges = self.angle_ranges[:2]
-            eyelid_center = self.initial_center[:2]
-            self._send_servos(EYELID_CHANNELS, eyelid_center, eyelid_ranges)
-            time.sleep(1.5)
-
-            best_eyelid_angles, best_l_open, best_r_open, eyelid_iter = \
-                self._run_phase1_eyelid()
-
-            avg_score = (best_l_open + best_r_open) / 2.0
-            result = TuningResult(
-                best_angles=best_eyelid_angles,
-                best_score=avg_score,
-                best_eye_score=avg_score,
-                iteration=eyelid_iter,
-                total_iterations=eyelid_iter,
-                score_history=[],
-                region_scores={
-                    "L_Openness": best_l_open,
-                    "R_Openness": best_r_open,
-                    "average": avg_score,
-                },
-            )
-
-            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "best_eyelid_config.json")
-            result.save(save_path)
-            print(f"[INFO] 眼皮调优结果已保存 → {save_path}")
-            return result
-
-        except KeyboardInterrupt:
-            print("\n\n[INTERRUPTED] 用户中断了眼皮优化过程")
-            return None
-        except Exception as e:
-            print(f"\n[ERROR] 眼皮优化过程中出错: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-        finally:
-            self.cleanup()
-
-   
     # ==================================================================
-    # 结果保存与报告
+    # 结果保存
     # ==================================================================
 
-    def _save_result(self, result: TuningResult):
-        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "best_eye_config.json")
-        result.save(save_path)
-
-    def _make_partial_result(self, eyelid_angles, eyeball_angles,
-                             score, eyelid_iter, region_scores):
-        """构造中途停止的部分结果"""
+    def save_result(self, angles: List[int], region_scores: dict = None,
+                    save_path: str = "best_eye_config.json"):
+        """保存当前角度结果到 JSON"""
+        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), save_path)
         result = TuningResult(
-            best_angles=eyelid_angles + eyeball_angles,
-            best_score=score,
-            best_eye_score=score,
-            iteration=eyelid_iter,
-            total_iterations=eyelid_iter,
+            best_angles=angles,
+            best_score=region_scores.get("average", 0) if region_scores else 0,
+            best_eye_score=region_scores.get("average", 0) if region_scores else 0,
+            iteration=0,
+            total_iterations=0,
             score_history=[],
-            region_scores=region_scores,
+            region_scores=region_scores or {},
         )
-        self._save_result(result)
+        result.save(save_path)
+        print(f"[INFO] 结果已保存 → {save_path}")
         return result
 
-    def _print_two_phase_report(self, result,
-                                 eyelid_iter, l_open, r_open, eyelid_angles,
-                                 eyeball_iter, eye_score, eyeball_angles,
-                                 eyelid_target, eyeball_target):
-        """打印两阶段调优最终报告"""
-        print("\n" + "=" * 65)
-        print("  两阶段优化完成 - 最终报告")
-        print("=" * 65)
-
-        print(f"\n  Phase 1: 眼皮 (A8/A9) | 目标开放度 ≥ {eyelid_target}% (单眼达标即锁定)")
-        l_mark = "OK" if l_open >= eyelid_target else "X "
-        r_mark = "OK" if r_open >= eyelid_target else "X "
-        print(f"    迭代: {eyelid_iter}")
-        print(f"    L_Openness: {l_open:.1f}% [{l_mark}]  "
-              f"R_Openness: {r_open:.1f}% [{r_mark}]  "
-              f"Avg: {(l_open + r_open) / 2:.1f}%")
-        print(f"    A8={eyelid_angles[0]}°  A9={eyelid_angles[1]}°")
-
-        print(f"\n  Phase 2: 眼球 (A10-A13) | 目标综合得分 ≥ {eyeball_target}%")
-        score_mark = "OK" if eye_score >= eyeball_target else "X "
-        print(f"    迭代: {eyeball_iter}")
-        print(f"    综合得分: {eye_score:.1f}% [{score_mark}]")
-        for name, angle in zip(["A10", "A11", "A12", "A13"], eyeball_angles):
-            print(f"    {name}: {angle}°")
-
-        if result.region_scores:
-            print(f"\n  各区域得分详情:")
-            items = []
-            for region, score in result.region_scores.items():
-                if region.startswith("_"):
-                    continue
-                try:
-                    s = float(score)
-                except (TypeError, ValueError):
-                    continue
-                items.append((region, s))
-            for region, score in sorted(items, key=lambda x: -x[1]):
-                bar_len = int(score / 4)
-                bar = "#" * bar_len + "-" * (25 - bar_len)
-                print(f"    {region:<15}: {score:>5.1f}%  |{bar}|")
-
-        if self._stopped_by_user:
-            print(f"\n  注意: 优化被用户手动停止")
-
-        print(f"\n  最佳舵机角度 (A8-A13):")
-        for name, angle in zip(EYE_SERVO_NAMES, result.best_angles):
-            print(f"    {name}: {angle}°")
-
-        print("\n" + "=" * 65 + "\n")
-
-    def _export_angle_config(self, angles: List[int]):
+    def export_angle_config(self, angles: List[int]):
+        """导出角度配置到 eye_angles_best.json"""
         config = {
-            "description": "EyeAutoTuner 最佳眼睛舵机角度配置",
+            "description": "EyeAutoTuner 眼睛舵机角度配置",
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "strategy": self.strategy_name,
             "servo_angles": {
                 name: {"channel": ch, "angle": ang}
                 for name, ch, ang in zip(EYE_SERVO_NAMES, EYE_SERVO_CHANNELS, angles)
@@ -798,10 +434,9 @@ class EyeAutoTuner:
 
     def cleanup(self):
         """清理资源"""
-        self._running = False
         if self.scorer:
             try:
-                self.scorer.close()
+                self.scorer.close()  # 内部会 stop_display
             except Exception:
                 pass
         if self.controller:
@@ -809,7 +444,6 @@ class EyeAutoTuner:
                 self.controller.close()
             except Exception:
                 pass
-        cv2.destroyAllWindows()
         print("[INFO] 资源已释放")
 
 
@@ -821,48 +455,34 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="眼睛舵机自动参数优化工具",
+        description="眼睛舵机调整工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python eye_auto_tuner.py --port COM3 --iter 100
-  python eye_auto_tuner.py --step 2 --iter 500
-        """
     )
 
     parser.add_argument("--port", type=str, default="COM5",
                        help="串口端口号 (默认: COM5)")
     parser.add_argument("--baud", type=int, default=115200,
                        help="波特率 (默认: 115200)")
-    parser.add_argument("--strategy", type=str, default="coordinate",
-                       choices=["coordinate"],
-                       help="优化策略 (默认: coordinate)")
-    parser.add_argument("--iter", type=int, default=100,
-                       help="最大迭代次数 (默认: 100)")
-    parser.add_argument("--step", type=int, default=5,
-                       help="坐标下降步长 (默认: 5)")
     parser.add_argument("--stabilize", type=int, default=8,
                        help="每次采集稳定帧数 (默认: 8)")
     parser.add_argument("--settle", type=int, default=300,
                        help="舵机等待时间ms (默认: 300)")
-    parser.add_argument("--no-preview", action="store_true",
-                       help="禁用预览窗口")
-    parser.add_argument("--phase", type=str, default="two-phase",
-                       choices=["two-phase", "eyelid"],
-                       help="优化模式: two-phase=先眼皮再眼球(默认), eyelid=仅A8/A9")
-    parser.add_argument("--config", type=str, default="eyelid_tuner_config.json",
-                       help="配置文件 (默认: eyelid_tuner_config.json)")
+    parser.add_argument("--ratio", type=float, default=2.0,
+                       help="像素→角度换算系数 (默认: 2.0 °/px)")
+    parser.add_argument("--max-iter", type=int, default=50,
+                       help="自动调整最大迭代次数 (默认: 50)")
+    parser.add_argument("--wait", type=float, default=1.0,
+                       help="每次移动后等待秒数 (默认: 1.0)")
 
     args = parser.parse_args()
 
-    print(f"""
+    print("""
 +==============================================================+
-|       Eye Auto Tuner - {'两阶段优化' if args.phase == 'two-phase' else '眼皮模式 (A8/A9)':24s}|
+|       Eye Auto Tuner - 眼睛舵机调整工具                        |
 +==============================================================+
-|  {'Phase 1: 眼皮 (A8/A9) → 开放度 ≥ 99%' if args.phase == 'two-phase' else 'Phase:   眼皮 (A8/A9) → 开放度 ≥ 99%':40s}|
-|  {'Phase 2: 眼球 (A10-A13) → 综合得分' if args.phase == 'two-phase' else '':40s}|
+|  功能: 引导式自动调整 (A10-A13 眼球)                         |
+|  流程: 采集60帧→去头尾求平均→关检测→移舵机→等1s→循环       |
 |  Keys: [Q/Esc] Stop                                         |
-|  Output: best_eye_config.json                                |
 +==============================================================+
 """)
 
@@ -870,23 +490,33 @@ def main():
         yaml_file="29_servo_config(13).yaml",
         port=args.port,
         baudrate=args.baud,
-        strategy=args.strategy,
-        max_iterations=args.iter,
-        angle_step=args.step,
         stabilize_frames=args.stabilize,
         settle_time_ms=args.settle,
-        show_preview=not args.no_preview,
     )
 
-    if args.phase == "eyelid":
-        result = tuner.run_eyelid_phase()
-    else:
-        result = tuner.run()
+    try:
+        tuner.initialize()
 
-    if result:
-        print("\nDone! Results saved.")
-    else:
-        print("\nTuning did not complete normally.")
+        # 启动引导式自动调整
+        passed, iterations, region_scores = tuner.auto_adjust(
+            pixel_to_degree=args.ratio,
+            max_iterations=args.max_iter,
+            wait_seconds=args.wait,
+        )
+
+        if passed:
+            print(f"\nDone! 调整通过，共 {iterations} 次迭代。")
+        else:
+            print(f"\n调整未通过 (迭代 {iterations} 次)。")
+
+    except KeyboardInterrupt:
+        print("\n\n[INTERRUPTED] 用户中断")
+    except Exception as e:
+        print(f"\n[ERROR] 出错: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        tuner.cleanup()
 
 
 if __name__ == "__main__":
