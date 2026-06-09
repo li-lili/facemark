@@ -18,6 +18,8 @@ EYE_SERVO_NAMES = ["A8", "A9", "A10", "A11", "A12", "A13"]
 # 分组常量
 EYELID_CHANNELS = [8, 9]       # A8,A9 眼皮
 EYEBALL_CHANNELS = [10, 11, 12, 13]  # A10-A13 眼球
+EYEBROW_CHANNELS = [0, 1]      # A0(左眉), A1(右眉)
+EYEBROW_NAMES = ["A0", "A1"]
 
 # ============================================================
 # 眼球偏移容差（像素）
@@ -41,6 +43,22 @@ RIGHT_EYE_CORNERS = (362, 263)
 # 眼皮自动调整参数
 EYELID_WAIT_SECONDS = 1.0      # 每次调整后等待秒数
 EYELID_MAX_ITERATIONS = 30     # 最大调整轮次
+
+# ============================================================
+# 眉毛 EBHR (Eyebrow Height Ratio) 参数
+# ============================================================
+EYEBROW_BASELINE_FILE = "eyebrow_baseline.json"
+EYEBROW_EBHR_TOLERANCE = 0.01          # EBHR 偏差容差
+EYEBROW_WAIT_SECONDS = 1.0             # 每次调整后等待秒数
+EYEBROW_MAX_ITERATIONS = 30            # 最大调整轮次
+
+# EBHR 计算用关键点 (MediaPipe 478 关键点索引)
+# 左眉: 眉弓上缘8个关键点 (更稳健)
+LEFT_BROW_POINTS = [52, 53, 55, 63, 65, 66, 105, 107]
+LEFT_BROW_CORNERS = (33, 133)          # (外眼角, 内眼角)
+# 右眉: 眉弓上缘8个关键点
+RIGHT_BROW_POINTS = [282, 283, 285, 293, 295, 296, 334, 336]
+RIGHT_BROW_CORNERS = (362, 263)
 
 # ============================================================
 # 默认角度范围（度）

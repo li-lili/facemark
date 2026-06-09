@@ -1,14 +1,14 @@
 {
   "description": "EyeAutoTuner 眼睛舵机角度配置",
-  "timestamp": "2026-06-08 17:22:09",
+  "timestamp": "2026-06-09 14:07:26",
   "servo_angles": {
     "A8": {
       "channel": 8,
-      "angle": 136
+      "angle": 134
     },
     "A9": {
       "channel": 9,
-      "angle": 132
+      "angle": 135
     },
     "A10": {
       "channel": 10,
@@ -37,8 +37,8 @@
       13
     ],
     "angles": [
-      136,
-      132,
+      134,
+      135,
       73,
       205,
       170,

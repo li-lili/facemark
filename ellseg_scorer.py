@@ -18,6 +18,7 @@ ELLSEG_REPO = os.path.join(DIR, "EllSeg")
 WEIGHTS_PATH = os.path.join(ELLSEG_REPO, "weights", "all.git_ok")
 FACE_POINTS_FILE = os.path.join(DIR, "face_points.json")
 EYELID_BASELINE_FILE = os.path.join(DIR, "eyelid_baseline.json")
+EYEBROW_BASELINE_FILE = os.path.join(DIR, "eyebrow_baseline.json")
 
 from eye_constants import EYEBALL_OFFSET_TOLERANCE
 TOLERANCE = EYEBALL_OFFSET_TOLERANCE        # 合格阈值 (像素)
@@ -251,6 +252,32 @@ def load_eyelid_baseline(filepath=None):
 
 
 # ============================================================
+# 眉毛基线管理
+# ============================================================
+def save_eyebrow_baseline(left_ebhr, right_ebhr, filepath=None):
+    if filepath is None:
+        filepath = EYEBROW_BASELINE_FILE
+    data = {"left_ebhr": float(left_ebhr), "right_ebhr": float(right_ebhr)}
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[Eyebrow Baseline] Saved: L_EBHR={left_ebhr:.4f} R_EBHR={right_ebhr:.4f}")
+
+
+def load_eyebrow_baseline(filepath=None):
+    if filepath is None:
+        filepath = EYEBROW_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"left_ebhr": float(d["left_ebhr"]), "right_ebhr": float(d["right_ebhr"])}
+    except Exception as e:
+        print(f"[Eyebrow Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
 # 主类
 # ============================================================
 class EllSegDetector:
@@ -317,6 +344,15 @@ class EllSegDetector:
             print(f"  R_EAR = {self.eyelid_baseline['right_ear']:.4f}")
         else:
             print("[Eyelid Baseline] No eyelid baseline found.")
+
+        # 眉毛基线
+        self.eyebrow_baseline = load_eyebrow_baseline()
+        if self.eyebrow_baseline:
+            print(f"[Eyebrow Baseline] Loaded from {EYEBROW_BASELINE_FILE}")
+            print(f"  L_EBHR = {self.eyebrow_baseline['left_ebhr']:.4f}")
+            print(f"  R_EBHR = {self.eyebrow_baseline['right_ebhr']:.4f}")
+        else:
+            print("[Eyebrow Baseline] No eyebrow baseline found.")
 
         self._timestamp = 0
         self.last_result = None
@@ -429,6 +465,23 @@ class EllSegDetector:
                                    (0, 255, 0) if l_ok else (0, 0, 255), 1)
                         cv2.putText(img, f"R_EAR={r_ear:.3f} (bl={bl['right_ear']:.3f})",
                                    (10, y_ear + 16), 0, 0.35,
+                                   (0, 255, 0) if r_ok else (0, 0, 255), 1)
+
+                # EBHR 眉毛高度比 (如果有基线)
+                if self.eyebrow_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_eyebrow_signal()
+                    if signal:
+                        bl = self.eyebrow_baseline
+                        l_ebhr = signal["left_ebhr"]
+                        r_ebhr = signal["right_ebhr"]
+                        l_ok = signal["left_qualified"]
+                        r_ok = signal["right_qualified"]
+                        y_brow = 115
+                        cv2.putText(img, f"L_EBHR={l_ebhr:.3f} (bl={bl['left_ebhr']:.3f})",
+                                   (10, y_brow), 0, 0.35,
+                                   (0, 255, 0) if l_ok else (0, 0, 255), 1)
+                        cv2.putText(img, f"R_EBHR={r_ebhr:.3f} (bl={bl['right_ebhr']:.3f})",
+                                   (10, y_brow + 16), 0, 0.35,
                                    (0, 255, 0) if r_ok else (0, 0, 255), 1)
 
                 # 检测耗时拆解 (ms)
@@ -733,7 +786,11 @@ class EllSegDetector:
             "iris_left": det["left_iris"],
             "iris_right": det["right_iris"],
         }
-        save_baseline(**self.baseline)
+        save_baseline(
+            nose_pos=self.baseline["nose"],
+            left_iris_pos=self.baseline["iris_left"],
+            right_iris_pos=self.baseline["iris_right"],
+        )
         return True
 
     # ==================================================================
@@ -788,12 +845,41 @@ class EllSegDetector:
                 lms_smooth, RIGHT_EAR_PAIRS, RIGHT_EYE_CORNERS),
         }
 
+    @staticmethod
+    def _calc_ebhr(lms_smooth, brow_points, corners):
+        """
+        计算单眉 Eyebrow Height Ratio。
+        EBHR = (眉弓Y均值 - 眼角Y均值) / 眼宽
+        """
+        brow_y = np.mean([lms_smooth[i, 1] for i in brow_points])
+        corner_y = np.mean([lms_smooth[i, 1] for i in corners])
+        outer_i, inner_i = corners
+        eye_width = abs(lms_smooth[inner_i, 0] - lms_smooth[outer_i, 0])
+        if eye_width < 1e-6:
+            return 0.0
+        return float((brow_y - corner_y) / eye_width)
+
+    @staticmethod
+    def _calc_ebhrs(lms_smooth):
+        """计算双眼 EBHR。"""
+        from eye_constants import (
+            LEFT_BROW_POINTS, LEFT_BROW_CORNERS,
+            RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS,
+        )
+        return {
+            "left": EllSegDetector._calc_ebhr(
+                lms_smooth, LEFT_BROW_POINTS, LEFT_BROW_CORNERS),
+            "right": EllSegDetector._calc_ebhr(
+                lms_smooth, RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS),
+        }
+
     def get_eyelid_signal(self, lms_smooth=None):
         """
         返回眼皮 EAR 信号 — 对比基线 EAR。
 
         Args:
             lms_smooth: 平滑后的关键点坐标。若为 None，从最近一次 detect 结果获取。
+
 
         Returns:
             dict 或 None:
@@ -845,6 +931,64 @@ class EllSegDetector:
         save_eyelid_baseline(left_ear=ears["left"], right_ear=ears["right"])
         return True
 
+    # ==================================================================
+    # 眉毛 EBHR 计算与信号
+    # ==================================================================
+
+    def get_eyebrow_signal(self, lms_smooth=None):
+        """
+        返回眉毛 EBHR 信号 — 对比基线 EBHR。
+
+        Args:
+            lms_smooth: 平滑后的关键点坐标。若为 None，从最近一次 detect 结果获取。
+
+        Returns:
+            dict 或 None:
+              left_ebhr, right_ebhr: 当前帧 EBHR 值
+              left_delta, right_delta: 与基线的偏差
+              left_qualified, right_qualified: 是否在容差范围内
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.eyebrow_baseline is None:
+            return None
+
+        ebhrs = self._calc_ebhrs(lms_smooth)
+        bl = self.eyebrow_baseline
+        from eye_constants import EYEBROW_EBHR_TOLERANCE
+        tol = EYEBROW_EBHR_TOLERANCE
+
+        left_delta = ebhrs["left"] - bl["left_ebhr"]
+        right_delta = ebhrs["right"] - bl["right_ebhr"]
+
+        return {
+            "left_ebhr": ebhrs["left"],
+            "right_ebhr": ebhrs["right"],
+            "left_delta": left_delta,
+            "right_delta": right_delta,
+            "left_qualified": abs(left_delta) <= tol,
+            "right_qualified": abs(right_delta) <= tol,
+        }
+
+    def save_current_eyebrow_baseline(self, lms_smooth=None):
+        """手动保存当前帧的 EBHR 值为眉毛基线"""
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                print("[Eyebrow Baseline] Cannot save: no landmark data")
+                return False
+            lms_smooth = self._last_lms_smooth
+
+        ebhrs = self._calc_ebhrs(lms_smooth)
+        self.eyebrow_baseline = {
+            "left_ebhr": ebhrs["left"],
+            "right_ebhr": ebhrs["right"],
+        }
+        save_eyebrow_baseline(left_ebhr=ebhrs["left"], right_ebhr=ebhrs["right"])
+        return True
+
     def close(self):
         self.stop_display()
         if hasattr(self, 'landmarker') and self.landmarker:
@@ -863,7 +1007,7 @@ if __name__ == "__main__":
 
     detector = EllSegDetector()
     detector.start_display()
-    print("\n[S] Save eyeball baseline  [E] Save eyelid baseline  [1] Toggle MP  [2] Toggle EllSeg  [Q] Quit")
+    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [1] Toggle MP  [2] Toggle EllSeg  [Q] Quit")
 
     if raw_test:
         print("\n[Raw FPS Test] 仅测量摄像头原始读取帧率 (跳过 MediaPipe + EllSeg)...")
@@ -892,6 +1036,10 @@ if __name__ == "__main__":
             # 检测 E 键保存眼皮基线
             if last in (ord('e'), ord('E')):
                 detector.save_current_eyelid_baseline()
+                detector._last_key = None
+            # 检测 B 键保存眉毛基线
+            if last in (ord('b'), ord('B')):
+                detector.save_current_eyebrow_baseline()
                 detector._last_key = None
 
     except KeyboardInterrupt:
