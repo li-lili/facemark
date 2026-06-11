@@ -7,14 +7,14 @@ SERVO_INFO:
     channel_idx: 0
     start_deg: 220
     end_deg: 70
-    temp_deg: 195
+    temp_deg: 135
     coefficient: 1
   A1:
     info: R_eyebrow_head_ver 右眉头 上——下
     channel_idx: 1
     start_deg: 50
     end_deg: 200
-    temp_deg: 105
+    temp_deg: 135
     coefficient: 1
   A2:
     info: L_eyebrow_head_hor 左眉头 内——外
@@ -63,42 +63,42 @@ SERVO_INFO:
     channel_idx: 8
     start_deg: 210
     end_deg: 115
-    temp_deg: 140
+    temp_deg: 130
     coefficient: 1
   A9:
     info: R_vertical_eyeball 右眼皮 开——合
     channel_idx: 9
     start_deg: 60
     end_deg: 155
-    temp_deg: 118
+    temp_deg: 140
     coefficient: 1
   A10:
     info: L_horizontal_eyeball 左眼球 上——下
     channel_idx: 10
     start_deg: 115
     end_deg: 45
-    temp_deg: 60
+    temp_deg: 80
     coefficient: 1
   A11:
     info: R_horizontal_eyeball 右眼球 上——下
     channel_idx: 11
     start_deg: 160
     end_deg: 225
-    temp_deg: 172
+    temp_deg: 192
     coefficient: 1
   A12:
     info: L_cheek 左眼球 内——外
     channel_idx: 12
     start_deg: 205
     end_deg: 135
-    temp_deg: 146
+    temp_deg: 173
     coefficient: 1
   A13:
     info: R_cheek 右眼球 内——外
     channel_idx: 13
     start_deg: 65
     end_deg: 135
-    temp_deg: 127
+    temp_deg: 97
     coefficient: 1
   A14:
     info: nose 右脸颊 下——上
@@ -119,7 +119,7 @@ SERVO_INFO:
     channel_idx: 16
     start_deg: 100
     end_deg: 165
-    temp_deg: 110
+    temp_deg: 140
     coefficient: 1
   A17:
     info: mid_lower_lip_hor 中上嘴唇 前——后
@@ -140,7 +140,7 @@ SERVO_INFO:
     channel_idx: 19
     start_deg: 200
     end_deg: 130
-    temp_deg: 165
+    temp_deg: 185
     coefficient: 1
   A20:
     info: RL_upper_lip 上嘴唇 上——下
@@ -161,33 +161,33 @@ SERVO_INFO:
     channel_idx: 22
     start_deg: 180
     end_deg: 120
-    temp_deg: 135
+    temp_deg: 145
     coefficient: 1
   A23:
     info: L_mouth_ver 左嘴角 上——下
     channel_idx: 23
     start_deg: 205
     end_deg: 125
-    temp_deg: 135
+    temp_deg: 175
     coefficient: 1
   A24:
     info: L_mouth_hor 左嘴角 前——后
     channel_idx: 24
     start_deg: 90
     end_deg: 150
-    temp_deg: 135
+    temp_deg: 125
     coefficient: 1
   A25:
     info: R_mouth_ver 右嘴角 上——下
     channel_idx: 25
     start_deg: 65
     end_deg: 145
-    temp_deg: 135
+    temp_deg: 95
     coefficient: 1
   A26:
     info: chin_vertical 下巴 合——开
     channel_idx: 26
     start_deg: 90
     end_deg: 165
-    temp_deg: 120
+    temp_deg: 100
     coefficient: 1

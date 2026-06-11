@@ -61,11 +61,73 @@ RIGHT_BROW_POINTS = [282, 283, 285, 293, 295, 296, 334, 336]
 RIGHT_BROW_CORNERS = (362, 263)
 
 # ============================================================
+# 嘴部 MAR (Mouth Aspect Ratio) 参数 — A26 下巴
+# ============================================================
+MOUTH_BASELINE_FILE = "mouth_baseline.json"
+MOUTH_MAR_TOLERANCE = 0.015          # MAR 偏差容差
+MOUTH_WAIT_SECONDS = 1.0
+MOUTH_MAX_ITERATIONS = 30
+MOUTH_CHIN_CHANNEL = 26              # A26 下巴
+
+# MAR 计算用关键点 (MediaPipe 478)
+MOUTH_TOP = 1         # 鼻尖(鼻子中间)
+MOUTH_BOTTOM = 152    # 下巴点
+MOUTH_NORM_LEFT = 33   # 左眼外角 — 归一化参考
+MOUTH_NORM_RIGHT = 263 # 右眼外角 — 归一化参考
+
+# ============================================================
+# 下唇 LLR (Lower Lip Ratio) 参数 — A19 中下嘴唇
+# ============================================================
+LOWER_LIP_BASELINE_FILE = "lower_lip_baseline.json"
+LOWER_LIP_LLR_TOLERANCE = 0.005      # LLR 偏差容差
+LOWER_LIP_WAIT_SECONDS = 1.0
+LOWER_LIP_MAX_ITERATIONS = 30
+LOWER_LIP_CHANNEL = 19               # A19 中下嘴唇
+
+# LLR 计算用关键点 (MediaPipe 478)
+LL_LIP_UPPER = 14      # 下唇上缘 (唇红边界)
+LL_LIP_LOWER = 17      # 下唇下缘
+LL_NORM_LEFT = 33       # 左眼外角 — 归一化参考
+LL_NORM_RIGHT = 263     # 右眼外角 — 归一化参考
+
+# ============================================================
+# 上唇 ULR (Upper Lip Ratio) 参数 — A16 中上嘴唇
+# ============================================================
+UPPER_LIP_BASELINE_FILE = "upper_lip_baseline.json"
+UPPER_LIP_ULR_TOLERANCE = 0.002      # ULR 偏差容差
+UPPER_LIP_WAIT_SECONDS = 1.0
+UPPER_LIP_MAX_ITERATIONS = 30
+UPPER_LIP_CHANNEL = 16               # A16 中上嘴唇
+
+# ULR 计算用关键点 (MediaPipe 478)
+UL_LIP_TOP = 0         # 上唇上缘(人中) — mp0
+UL_IRIS_LEFT = 468     # 左眼虹膜中心
+UL_IRIS_RIGHT = 473    # 右眼虹膜中心
+UL_NORM_LEFT = 33      # 左眼外角 — 归一化参考1
+UL_NORM_RIGHT = 263    # 右眼外角 — 归一化参考1
+UL_NORM_LEFT2 = 37     # 左脸轮廓(更宽) — 归一化参考2
+UL_NORM_RIGHT2 = 267   # 右脸轮廓(更宽) — 归一化参考2
+
+# ============================================================
 # 默认角度范围（度）
 # ============================================================
 DEFAULT_ANGLE_MIN = 0
 DEFAULT_ANGLE_MAX = 270
 DEFAULT_ANGLE_STEP = 5  # 默认搜索步长
+
+# ============================================================
+# 嘴角调优参数 — A22-A25
+# ============================================================
+MOUTH_CORNERS_BASELINE_FILE = "mouth_corners_baseline.json"
+MOUTH_CORNER_LEFT_IDX = 61        # 左嘴角 MediaPipe 索引
+MOUTH_CORNER_RIGHT_IDX = 291      # 右嘴角 MediaPipe 索引
+MOUTH_CORNER_TOLERANCE = 1      # 水平像素容差 (px)
+MOUTH_CORNER_Y_TOLERANCE = 1    # 垂直像素容差 (px) — 更严格
+MOUTH_CORNER_WAIT_SECONDS = 1.0
+MOUTH_CORNER_MAX_ITERATIONS = 30
+# A22=右嘴角水平(前→后), A23=左嘴角垂直(上→下), A24=左嘴角水平(前→后), A25=右嘴角垂直(上→下)
+MOUTH_CORNER_H_CHANNELS = [24, 22]     # [左水平A24, 右水平A22]
+MOUTH_CORNER_V_CHANNELS = [23, 25]     # [左垂直A23, 右垂直A25]
 
 # ============================================================
 # 摄像头配置

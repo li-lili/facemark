@@ -1,0 +1,331 @@
+{
+  "description": "全量 27 通道舵机调优最佳配置",
+  "timestamp": "2026-06-11 11:17:38",
+  "yaml_source": "29_servo_config(13).yaml",
+  "servos": [
+    {
+      "name": "A0",
+      "channel": 0,
+      "info": "L_eyebrow_head_ver 左眉头 上——下",
+      "range": [
+        220,
+        70
+      ],
+      "original_deg": 195,
+      "tuned_deg": 195,
+      "delta": 0
+    },
+    {
+      "name": "A1",
+      "channel": 1,
+      "info": "R_eyebrow_head_ver 右眉头 上——下",
+      "range": [
+        50,
+        200
+      ],
+      "original_deg": 105,
+      "tuned_deg": 105,
+      "delta": 0
+    },
+    {
+      "name": "A2",
+      "channel": 2,
+      "info": "L_eyebrow_head_hor 左眉头 内——外",
+      "range": [
+        205,
+        105
+      ],
+      "original_deg": 105,
+      "tuned_deg": 105,
+      "delta": 0
+    },
+    {
+      "name": "A3",
+      "channel": 3,
+      "info": "R_eyebrow_head_hor 右眉头 内——外",
+      "range": [
+        65,
+        165
+      ],
+      "original_deg": 165,
+      "tuned_deg": 165,
+      "delta": 0
+    },
+    {
+      "name": "A4",
+      "channel": 4,
+      "info": "L_eyebrow_tail 左眉尾 上——下",
+      "range": [
+        90,
+        135
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A5",
+      "channel": 5,
+      "info": "R_eyebrow_tail 右眉尾 上——下",
+      "range": [
+        180,
+        135
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A6",
+      "channel": 6,
+      "info": "L_upper_eyelid 左眉 前——后",
+      "range": [
+        105,
+        165
+      ],
+      "original_deg": 125,
+      "tuned_deg": 125,
+      "delta": 0
+    },
+    {
+      "name": "A7",
+      "channel": 7,
+      "info": "R_upper_eyelid 右眉 前——后",
+      "range": [
+        165,
+        105
+      ],
+      "original_deg": 145,
+      "tuned_deg": 145,
+      "delta": 0
+    },
+    {
+      "name": "A8",
+      "channel": 8,
+      "info": "L_vertical_eyeball 左眼皮 开——合",
+      "range": [
+        210,
+        115
+      ],
+      "original_deg": 140,
+      "tuned_deg": 140,
+      "delta": 0
+    },
+    {
+      "name": "A9",
+      "channel": 9,
+      "info": "R_vertical_eyeball 右眼皮 开——合",
+      "range": [
+        60,
+        155
+      ],
+      "original_deg": 118,
+      "tuned_deg": 118,
+      "delta": 0
+    },
+    {
+      "name": "A10",
+      "channel": 10,
+      "info": "L_horizontal_eyeball 左眼球 上——下",
+      "range": [
+        115,
+        45
+      ],
+      "original_deg": 60,
+      "tuned_deg": 60,
+      "delta": 0
+    },
+    {
+      "name": "A11",
+      "channel": 11,
+      "info": "R_horizontal_eyeball 右眼球 上——下",
+      "range": [
+        160,
+        225
+      ],
+      "original_deg": 172,
+      "tuned_deg": 172,
+      "delta": 0
+    },
+    {
+      "name": "A12",
+      "channel": 12,
+      "info": "L_cheek 左眼球 内——外",
+      "range": [
+        205,
+        135
+      ],
+      "original_deg": 146,
+      "tuned_deg": 146,
+      "delta": 0
+    },
+    {
+      "name": "A13",
+      "channel": 13,
+      "info": "R_cheek 右眼球 内——外",
+      "range": [
+        65,
+        135
+      ],
+      "original_deg": 127,
+      "tuned_deg": 127,
+      "delta": 0
+    },
+    {
+      "name": "A14",
+      "channel": 14,
+      "info": "nose 右脸颊 下——上",
+      "range": [
+        90,
+        135
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A15",
+      "channel": 15,
+      "info": "mid_upper_lip_hor 左脸颊 上——下",
+      "range": [
+        180,
+        135
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A16",
+      "channel": 16,
+      "info": "mid_upper_lip_ver 中上嘴唇 上——下",
+      "range": [
+        100,
+        165
+      ],
+      "original_deg": 110,
+      "tuned_deg": 110,
+      "delta": 0
+    },
+    {
+      "name": "A17",
+      "channel": 17,
+      "info": "mid_lower_lip_hor 中上嘴唇 前——后",
+      "range": [
+        215,
+        175
+      ],
+      "original_deg": 205,
+      "tuned_deg": 205,
+      "delta": 0
+    },
+    {
+      "name": "A18",
+      "channel": 18,
+      "info": "mid_lower_lip_hor 中下嘴唇 前——后",
+      "range": [
+        160,
+        125
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A19",
+      "channel": 19,
+      "info": "mid_lower_lip_ver 中下嘴唇 上——下",
+      "range": [
+        200,
+        130
+      ],
+      "original_deg": 165,
+      "tuned_deg": 165,
+      "delta": 0
+    },
+    {
+      "name": "A20",
+      "channel": 20,
+      "info": "RL_upper_lip 上嘴唇 上——下",
+      "range": [
+        170,
+        90
+      ],
+      "original_deg": 120,
+      "tuned_deg": 120,
+      "delta": 0
+    },
+    {
+      "name": "A21",
+      "channel": 21,
+      "info": "RL_lower_lip 下嘴唇 上——下",
+      "range": [
+        50,
+        215
+      ],
+      "original_deg": 85,
+      "tuned_deg": 85,
+      "delta": 0
+    },
+    {
+      "name": "A22",
+      "channel": 22,
+      "info": "R_mouth_hor 右嘴角 前——后",
+      "range": [
+        180,
+        120
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A23",
+      "channel": 23,
+      "info": "L_mouth_ver 左嘴角 上——下",
+      "range": [
+        205,
+        125
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A24",
+      "channel": 24,
+      "info": "L_mouth_hor 左嘴角 前——后",
+      "range": [
+        90,
+        150
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A25",
+      "channel": 25,
+      "info": "R_mouth_ver 右嘴角 上——下",
+      "range": [
+        65,
+        145
+      ],
+      "original_deg": 135,
+      "tuned_deg": 135,
+      "delta": 0
+    },
+    {
+      "name": "A26",
+      "channel": 26,
+      "info": "chin_vertical 下巴 合——开",
+      "range": [
+        90,
+        165
+      ],
+      "original_deg": 120,
+      "tuned_deg": 120,
+      "delta": 0
+    }
+  ]
+}

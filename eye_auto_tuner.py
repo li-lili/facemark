@@ -1,4 +1,4 @@
-"""
+﻿"""
 Eye Auto Tuner — 眼睛舵机调整工具 (主入口)
 ==========================================
 核心功能: 初始化硬件 + 发送舵机角度 + 采集检测 + 保存结果
@@ -23,6 +23,7 @@ from typing import List, Tuple
 
 from Motor import FaceController
 from Communication import UARTDevice
+from utility import read_yaml
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
     EYEBALL_CHANNELS, EYELID_CHANNELS,     EYEBROW_CHANNELS, EYEBROW_NAMES,
@@ -30,6 +31,18 @@ from eye_constants import (
     DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX,
     CAMERA_INDEX, FLIP_HORIZONTAL,
     EYELID_EAR_TOLERANCE, EYELID_WAIT_SECONDS, EYELID_MAX_ITERATIONS,
+    MOUTH_MAR_TOLERANCE, MOUTH_WAIT_SECONDS, MOUTH_MAX_ITERATIONS,
+    MOUTH_CHIN_CHANNEL,
+    LOWER_LIP_LLR_TOLERANCE,
+    LOWER_LIP_WAIT_SECONDS, LOWER_LIP_MAX_ITERATIONS,
+    LOWER_LIP_CHANNEL,
+    UPPER_LIP_ULR_TOLERANCE,
+    UPPER_LIP_WAIT_SECONDS, UPPER_LIP_MAX_ITERATIONS,
+    UPPER_LIP_CHANNEL,
+    MOUTH_CORNER_TOLERANCE,
+    MOUTH_CORNER_Y_TOLERANCE,
+    MOUTH_CORNER_WAIT_SECONDS, MOUTH_CORNER_MAX_ITERATIONS,
+    MOUTH_CORNER_H_CHANNELS, MOUTH_CORNER_V_CHANNELS,
     TuningResult,
 )
 from ellseg_scorer import EllSegDetector, TOLERANCE
@@ -63,6 +76,16 @@ class EyeAutoTuner:
         self.controller = None
         self.scorer = None
         self.angle_ranges = [(DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX)] * len(EYE_SERVO_CHANNELS)
+
+    # ------------------------------------------------------------------
+    # 安全读取 list_temp_deg (list 没有 .get 方法)
+    # ------------------------------------------------------------------
+    def _temp_deg(self, ch, default=None):
+        """安全读取 controller.list_temp_deg[ch]，越界返回 default"""
+        try:
+            return self.controller.list_temp_deg[ch]
+        except (IndexError, TypeError):
+            return default
 
     # ==================================================================
     # 初始化
@@ -407,6 +430,227 @@ class EyeAutoTuner:
             if not keep_display:
                 self.scorer.stop_display()
 
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 上唇 ULR
+    # ==================================================================
+
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"ulr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_upper_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "ulr": signal["ulr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = UPPER_LIP_ULR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
+              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 上唇 (A16)
+    # ==================================================================
+
+    def auto_adjust_upper_lip(
+        self,
+        ulr_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A16 中上嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 ULR → 关闭 MP
+          2. 若 ULR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A16 → 等待 → 下一轮
+
+        Args:
+            ulr_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        if self.scorer.upper_lip_baseline is None:
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            return False, 0, {}
+
+        tol = UPPER_LIP_ULR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中上嘴唇 A16)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 ULR")
+        print(f"  步长: {ulr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: ULR 偏差 ≤ {tol}")
+        bl = self.scorer.upper_lip_baseline
+        print(f"  基线: ULR={bl['ulr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A16 的范围
+        ch = UPPER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ul_range = (min(start, end), max(start, end))
+        ul_sign = getattr(self, '_upper_lip_flip', 1)   # 默认: ULR小→增大角度
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A16={current_angle}° (range=[{ul_range[0]}, {ul_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 ULR ----
+                avg_signal = self.collect_upper_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [UpperLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                ulr = avg_signal["ulr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [UpperLip Iter {iteration:3d}] ULR={ulr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 上唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      ULR={ulr:.4f} (基线={bl['ulr']:.4f})")
+                    print(f"      A16={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    chin_angle = self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ll_angle = self._temp_deg(LOWER_LIP_CHANNEL)
+                    self.export_angle_config(all_angles,
+                                            chin_angle=chin_angle,
+                                            lower_lip_angle=ll_angle,
+                                            upper_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ UPPER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A16 ----
+                # delta>0 → ULR太大(上唇太展) → 合(-1); delta<0 → ULR太小(上唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ul_sign * delta_sign * ulr_step
+                new_angle = round(current_angle + move)
+                new_angle = max(ul_range[0], min(ul_range[1], new_angle))
+                self.send_servo(ch, new_angle, ul_range)
+                current_angle = new_angle
+                print(f"  [UpperLip Iter {iteration:3d}] 移动 A16={new_angle}° "
+                      f"(ULR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 上唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
     # ==================================================================
     # 多帧采集 + 修剪平均 — 眼皮 EAR
     # ==================================================================
@@ -673,6 +917,227 @@ class EyeAutoTuner:
                 self.scorer.stop_display()
 
     # ==================================================================
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 上唇 ULR
+    # ==================================================================
+
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"ulr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_upper_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "ulr": signal["ulr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = UPPER_LIP_ULR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
+              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 上唇 (A16)
+    # ==================================================================
+
+    def auto_adjust_upper_lip(
+        self,
+        ulr_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A16 中上嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 ULR → 关闭 MP
+          2. 若 ULR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A16 → 等待 → 下一轮
+
+        Args:
+            ulr_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        if self.scorer.upper_lip_baseline is None:
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            return False, 0, {}
+
+        tol = UPPER_LIP_ULR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中上嘴唇 A16)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 ULR")
+        print(f"  步长: {ulr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: ULR 偏差 ≤ {tol}")
+        bl = self.scorer.upper_lip_baseline
+        print(f"  基线: ULR={bl['ulr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A16 的范围
+        ch = UPPER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ul_range = (min(start, end), max(start, end))
+        ul_sign = getattr(self, '_upper_lip_flip', 1)   # 默认: ULR小→增大角度
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A16={current_angle}° (range=[{ul_range[0]}, {ul_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 ULR ----
+                avg_signal = self.collect_upper_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [UpperLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                ulr = avg_signal["ulr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [UpperLip Iter {iteration:3d}] ULR={ulr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 上唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      ULR={ulr:.4f} (基线={bl['ulr']:.4f})")
+                    print(f"      A16={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    chin_angle = self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ll_angle = self._temp_deg(LOWER_LIP_CHANNEL)
+                    self.export_angle_config(all_angles,
+                                            chin_angle=chin_angle,
+                                            lower_lip_angle=ll_angle,
+                                            upper_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ UPPER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A16 ----
+                # delta>0 → ULR太大(上唇太展) → 合(-1); delta<0 → ULR太小(上唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ul_sign * delta_sign * ulr_step
+                new_angle = round(current_angle + move)
+                new_angle = max(ul_range[0], min(ul_range[1], new_angle))
+                self.send_servo(ch, new_angle, ul_range)
+                current_angle = new_angle
+                print(f"  [UpperLip Iter {iteration:3d}] 移动 A16={new_angle}° "
+                      f"(ULR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 上唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # ==================================================================
     # 多帧采集 + 修剪平均 — 眉毛 EBHR
     # ==================================================================
 
@@ -752,6 +1217,85 @@ class EyeAutoTuner:
         all_devs = [s[0] for s in samples]
         print(f"  [Eyebrow Collect] {len(samples)} frames, trim {trim}: "
               f"L_delta={avg['left_delta']:+.4f} R_delta={avg['right_delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 嘴部 MAR
+    # ==================================================================
+
+    def collect_mouth_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 MAR → 关闭 → 修剪平均。
+
+        流程:
+          1. 开启 MP
+          2. 连续采集 n_frames 帧 MAR 信号
+          3. 关闭 MP
+          4. 按 abs(delta) 排序，修剪上下
+          5. 返回平均 MAR 信号
+
+        Returns:
+            dict 或 None: {"mar", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_mouth_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "mar": signal["mar"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"Mouth Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [Mouth Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "mar": sum(s[1]["mar"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = MOUTH_MAR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [Mouth Collect] {len(samples)} frames, trim {trim}: "
+              f"MAR={avg['mar']:.4f} Δ={avg['delta']:+.4f} "
               f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
 
         return avg
@@ -937,6 +1481,1293 @@ class EyeAutoTuner:
             if not keep_display:
                 self.scorer.stop_display()
 
+    # 多帧采集 + 修剪平均 — 上唇 ULR
+    # ==================================================================
+
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"ulr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_upper_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "ulr": signal["ulr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = UPPER_LIP_ULR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
+              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 上唇 (A16)
+    # ==================================================================
+
+    def auto_adjust_upper_lip(
+        self,
+        ulr_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A16 中上嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 ULR → 关闭 MP
+          2. 若 ULR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A16 → 等待 → 下一轮
+
+        Args:
+            ulr_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        if self.scorer.upper_lip_baseline is None:
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            return False, 0, {}
+
+        tol = UPPER_LIP_ULR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中上嘴唇 A16)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 ULR")
+        print(f"  步长: {ulr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: ULR 偏差 ≤ {tol}")
+        bl = self.scorer.upper_lip_baseline
+        print(f"  基线: ULR={bl['ulr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A16 的范围
+        ch = UPPER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ul_range = (min(start, end), max(start, end))
+        ul_sign = getattr(self, '_upper_lip_flip', 1)   # 默认: ULR小→增大角度
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A16={current_angle}° (range=[{ul_range[0]}, {ul_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 ULR ----
+                avg_signal = self.collect_upper_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [UpperLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                ulr = avg_signal["ulr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [UpperLip Iter {iteration:3d}] ULR={ulr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 上唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      ULR={ulr:.4f} (基线={bl['ulr']:.4f})")
+                    print(f"      A16={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    chin_angle = self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ll_angle = self._temp_deg(LOWER_LIP_CHANNEL)
+                    self.export_angle_config(all_angles,
+                                            chin_angle=chin_angle,
+                                            lower_lip_angle=ll_angle,
+                                            upper_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ UPPER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A16 ----
+                # delta>0 → ULR太大(上唇太展) → 合(-1); delta<0 → ULR太小(上唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ul_sign * delta_sign * ulr_step
+                new_angle = round(current_angle + move)
+                new_angle = max(ul_range[0], min(ul_range[1], new_angle))
+                self.send_servo(ch, new_angle, ul_range)
+                current_angle = new_angle
+                print(f"  [UpperLip Iter {iteration:3d}] 移动 A16={new_angle}° "
+                      f"(ULR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 上唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # ==================================================================
+    # 引导式自动调整 — 嘴部下巴 (A26)
+    # ==================================================================
+
+    def auto_adjust_mouth_chin(
+        self,
+        mar_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A26 下巴舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 MAR → 关闭 MP
+          2. 若 MAR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A26 → 等待 → 下一轮
+
+        Args:
+            mar_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = MOUTH_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = MOUTH_WAIT_SECONDS
+
+        if self.scorer.mouth_baseline is None:
+            print("[WARN] 未加载嘴部基线! 请在 ellseg_scorer.py 中按 [M] 保存嘴部基线到 mouth_baseline.json")
+            return False, 0, {}
+
+        tol = MOUTH_MAR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅下巴 A26)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 MAR")
+        print(f"  步长: {mar_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: MAR 偏差 ≤ {tol}")
+        bl = self.scorer.mouth_baseline
+        print(f"  基线: MAR={bl['mar']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A26 的范围
+        ch = MOUTH_CHIN_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        chin_range = (min(start, end), max(start, end))
+        chin_sign = getattr(self, '_mouth_chin_flip', 1)  # 正方向: MAR大→合(角度减小)
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A26={current_angle}° (range=[{chin_range[0]}, {chin_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[Mouth Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 MAR ----
+                avg_signal = self.collect_mouth_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [Mouth Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                mar = avg_signal["mar"]
+                delta = avg_signal["delta"]
+
+                print(f"  [Mouth Iter {iteration:3d}] MAR={mar:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 下巴调整通过! 共迭代 {iteration} 次")
+                    print(f"      MAR={mar:.4f} (基线={bl['mar']:.4f})")
+                    print(f"      A26={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    self.export_angle_config(all_angles, chin_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ MOUTH PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A26 ----
+                # delta>0 → MAR太大(嘴太开) → 合(-1); delta<0 → MAR太小(嘴太闭) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = chin_sign * delta_sign * mar_step
+                new_angle = round(current_angle + move)
+                new_angle = max(chin_range[0], min(chin_range[1], new_angle))
+                self.send_servo(ch, new_angle, chin_range)
+                current_angle = new_angle
+                print(f"  [Mouth Iter {iteration:3d}] 移动 A26={new_angle}° "
+                      f"(MAR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[Mouth Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 下巴未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # 多帧采集 + 修剪平均 — 上唇 ULR
+    # ==================================================================
+
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"ulr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_upper_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "ulr": signal["ulr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = UPPER_LIP_ULR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
+              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 上唇 (A16)
+    # ==================================================================
+
+    def auto_adjust_upper_lip(
+        self,
+        ulr_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A16 中上嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 ULR → 关闭 MP
+          2. 若 ULR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A16 → 等待 → 下一轮
+
+        Args:
+            ulr_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        if self.scorer.upper_lip_baseline is None:
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            return False, 0, {}
+
+        tol = UPPER_LIP_ULR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中上嘴唇 A16)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 ULR")
+        print(f"  步长: {ulr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: ULR 偏差 ≤ {tol}")
+        bl = self.scorer.upper_lip_baseline
+        print(f"  基线: ULR={bl['ulr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A16 的范围
+        ch = UPPER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ul_range = (min(start, end), max(start, end))
+        ul_sign = getattr(self, '_upper_lip_flip', 1)   # 默认: ULR小→增大角度
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A16={current_angle}° (range=[{ul_range[0]}, {ul_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 ULR ----
+                avg_signal = self.collect_upper_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [UpperLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                ulr = avg_signal["ulr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [UpperLip Iter {iteration:3d}] ULR={ulr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 上唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      ULR={ulr:.4f} (基线={bl['ulr']:.4f})")
+                    print(f"      A16={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    chin_angle = self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ll_angle = self._temp_deg(LOWER_LIP_CHANNEL)
+                    self.export_angle_config(all_angles,
+                                            chin_angle=chin_angle,
+                                            lower_lip_angle=ll_angle,
+                                            upper_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ UPPER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A16 ----
+                # delta>0 → ULR太大(上唇太展) → 合(-1); delta<0 → ULR太小(上唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ul_sign * delta_sign * ulr_step
+                new_angle = round(current_angle + move)
+                new_angle = max(ul_range[0], min(ul_range[1], new_angle))
+                self.send_servo(ch, new_angle, ul_range)
+                current_angle = new_angle
+                print(f"  [UpperLip Iter {iteration:3d}] 移动 A16={new_angle}° "
+                      f"(ULR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 上唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 下唇 LLR
+    # ==================================================================
+
+    def collect_lower_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 LLR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"llr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_lower_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "llr": signal["llr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"LowerLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [LowerLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "llr": sum(s[1]["llr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = LOWER_LIP_LLR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [LowerLip Collect] {len(samples)} frames, trim {trim}: "
+              f"LLR={avg['llr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 下唇 (A19)
+    # ==================================================================
+
+    def auto_adjust_lower_lip(
+        self,
+        step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A19 中下嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 LLR → 关闭 MP
+          2. 若 LLR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A19 → 等待 → 下一轮
+
+        Args:
+            step:           每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = LOWER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = LOWER_LIP_WAIT_SECONDS
+
+        if self.scorer.lower_lip_baseline is None:
+            print("[WARN] 未加载下唇基线! 请在 ellseg_scorer.py 中按 [L] 保存下唇基线到 lower_lip_baseline.json")
+            return False, 0, {}
+
+        tol = LOWER_LIP_LLR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中下嘴唇 A19)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 LLR")
+        print(f"  步长: {step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: LLR 偏差 ≤ {tol}")
+        bl = self.scorer.lower_lip_baseline
+        print(f"  基线: LLR={bl['llr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A19 的范围
+        ch = LOWER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ll_range = (min(start, end), max(start, end))
+        ll_sign = getattr(self, '_lower_lip_flip', -1)  # 默认: LLR大→合
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A19={current_angle}° (range=[{ll_range[0]}, {ll_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[LowerLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 LLR ----
+                avg_signal = self.collect_lower_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [LowerLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                llr = avg_signal["llr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [LowerLip Iter {iteration:3d}] LLR={llr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 下唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      LLR={llr:.4f} (基线={bl['llr']:.4f})")
+                    print(f"      A19={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    self.export_angle_config(all_angles, chin_angle=(
+                        self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ), lower_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ LOWER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A19 ----
+                # delta>0 → LLR太大(下唇太展) → 合(-1); delta<0 → LLR太小(下唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ll_sign * delta_sign * step
+                new_angle = round(current_angle + move)
+                new_angle = max(ll_range[0], min(ll_range[1], new_angle))
+                self.send_servo(ch, new_angle, ll_range)
+                current_angle = new_angle
+                print(f"  [LowerLip Iter {iteration:3d}] 移动 A19={new_angle}° "
+                      f"(LLR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[LowerLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 下唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 嘴角偏移 (A22-A25)
+    # ==================================================================
+
+    def collect_mouth_corner_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧嘴角像素偏移 → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"left": {dx,dy,dist,qualified,adj_x,adj_y},
+                           "right": {dx,dy,dist,qualified,adj_x,adj_y},
+                           "all_qualified": bool}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (total_dist, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_mouth_corner_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            total_dist = signal["left"]["dist"] + signal["right"]["dist"]
+            samples.append((total_dist, {
+                "left":  dict(signal["left"]),
+                "right": dict(signal["right"]),
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"MouthCorner Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [MouthCorner Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {"left": {}, "right": {}}
+        for side in ("left", "right"):
+            for key in ("dx", "dy", "dist"):
+                avg[side][key] = sum(s[1][side][key] for s in trimmed) / n
+            avg[side]["adj_x"] = -avg[side]["dx"]
+            avg[side]["adj_y"] = -avg[side]["dy"]
+            avg[side]["qualified"] = avg[side]["dist"] <= MOUTH_CORNER_TOLERANCE
+
+        avg["all_qualified"] = avg["left"]["qualified"] and avg["right"]["qualified"]
+        avg["total_dist"] = avg["left"]["dist"] + avg["right"]["dist"]
+
+        all_dists = [s[0] for s in samples]
+        print(f"  [MouthCorner Collect] {len(samples)} frames, trim {trim}: "
+              f"avg_L=({avg['left']['dx']:+.1f},{avg['left']['dy']:+.1f}) "
+              f"avg_R=({avg['right']['dx']:+.1f},{avg['right']['dy']:+.1f}) "
+              f"(min={all_dists[0]:.1f}, max={all_dists[-1]:.1f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 嘴角 (A22-A25)  竖向优先 → 水平随后
+    # ==================================================================
+
+    def auto_adjust_mouth_corners(
+        self,
+        step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        两阶段串行调整 A22-A25 嘴角舵机：
+          Phase 1: 竖向 A23(左)+A25(右)  dy ≤ 0.1px
+          Phase 2: 水平 A24(左)+A22(右)  dx ≤ 1.0px
+
+        Args:
+            step:           每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = MOUTH_CORNER_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = MOUTH_CORNER_WAIT_SECONDS
+
+        if self.scorer.mouth_corners_baseline is None:
+            print("[WARN] 未加载嘴角基线! 请在 ellseg_scorer.py 中按 [C] 保存嘴角基线到 mouth_corners_baseline.json")
+            return False, 0, {}
+
+        tol_h = MOUTH_CORNER_TOLERANCE       # 1.0 px — 水平
+        tol_v = MOUTH_CORNER_Y_TOLERANCE     # 0.1 px — 垂直
+
+        # 通道: A24=左水平, A22=右水平, A23=左垂直, A25=右垂直
+        ch_Lh = MOUTH_CORNER_H_CHANNELS[0]   # A24
+        ch_Rh = MOUTH_CORNER_H_CHANNELS[1]   # A22
+        ch_Lv = MOUTH_CORNER_V_CHANNELS[0]   # A23
+        ch_Rv = MOUTH_CORNER_V_CHANNELS[1]   # A25
+
+        ranges = {
+            ch: (min(self.controller.list_start_deg[ch], self.controller.list_end_deg[ch]),
+                 max(self.controller.list_start_deg[ch], self.controller.list_end_deg[ch]))
+            for ch in [ch_Lh, ch_Rh, ch_Lv, ch_Rv]
+        }
+
+        h_flip = -1 if getattr(self, '_corner_horiz_flip', False) else 1
+        v_flip = -1 if getattr(self, '_corner_vert_flip', False) else 1
+
+        current = {ch: self._temp_deg(ch) for ch in [ch_Lh, ch_Rh, ch_Lv, ch_Rv]}
+
+        print(f"{'='*60}")
+        print(f"  嘴角两阶段调整 (A22-A25)")
+        print(f"  Phase 1: 竖向 Y (A23+A25) ≤ {tol_v}px")
+        print(f"  Phase 2: 水平 X (A24+A22) ≤ {tol_h}px")
+        print(f"  步长: {step}°/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        bl = self.scorer.mouth_corners_baseline
+        print(f"  基线: L=({bl['corner_left'][0]},{bl['corner_left'][1]}) "
+              f"R=({bl['corner_right'][0]},{bl['corner_right'][1]})")
+        print(f"  方向翻转: horiz={h_flip==-1} vert={v_flip==-1}")
+        print(f"  初始: A22={current[ch_Rh]}° A23={current[ch_Lv]}° "
+              f"A24={current[ch_Lh]}° A25={current[ch_Rv]}°")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        iteration = 0
+        sleep_chunk = 0.1
+        vert_done = False
+
+        def _wait():
+            _w = 0
+            while _w < wait_seconds:
+                time.sleep(min(sleep_chunk, wait_seconds - _w))
+                _w += sleep_chunk
+                if self.scorer.user_pressed_stop:
+                    break
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                phase = "VERT" if not vert_done else "HORIZ"
+                self.scorer.update_hud([
+                    (f"[Corner-{phase} {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                avg = self.collect_mouth_corner_samples(n_frames=60, trim=10)
+                if avg is None:
+                    print(f"  [Corner-{phase} {iteration:3d}] 无效帧")
+                    _wait()
+                    continue
+
+                L_dx, L_dy = avg["left"]["dx"], avg["left"]["dy"]
+                R_dx, R_dy = avg["right"]["dx"], avg["right"]["dy"]
+
+                L_dy_ok = abs(L_dy) <= tol_v
+                R_dy_ok = abs(R_dy) <= tol_v
+                L_dx_ok = abs(L_dx) <= tol_h
+                R_dx_ok = abs(R_dx) <= tol_h
+                vert_ok = L_dy_ok and R_dy_ok
+                horiz_ok = L_dx_ok and R_dx_ok
+
+                mark = lambda ok: "✓" if ok else "✗"
+                print(f"  [Corner-{phase} {iteration:3d}] "
+                      f"L=(dX={L_dx:+.1f}{mark(L_dx_ok)} dY={L_dy:+.1f}{mark(L_dy_ok)}) "
+                      f"R=(dX={R_dx:+.1f}{mark(R_dx_ok)} dY={R_dy:+.1f}{mark(R_dy_ok)})")
+
+                # ---- 全部通过 ----
+                if vert_ok and horiz_ok:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 嘴角通过! {iteration} 次")
+                    print(f"      A22={current[ch_Rh]}° A23={current[ch_Lv]}° "
+                          f"A24={current[ch_Lh]}° A25={current[ch_Rv]}°")
+                    print(f"{'='*60}\n")
+                    all_angles = [self._temp_deg(c) for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    self.export_angle_config(
+                        all_angles,
+                        chin_angle=self._temp_deg(MOUTH_CHIN_CHANNEL),
+                        lower_lip_angle=self._temp_deg(LOWER_LIP_CHANNEL),
+                        upper_lip_angle=self._temp_deg(UPPER_LIP_CHANNEL),
+                        corner_angles={
+                            "A22": {"channel": ch_Rh, "angle": current[ch_Rh]},
+                            "A23": {"channel": ch_Lv, "angle": current[ch_Lv]},
+                            "A24": {"channel": ch_Lh, "angle": current[ch_Lh]},
+                            "A25": {"channel": ch_Rv, "angle": current[ch_Rv]},
+                        },
+                    )
+                    self.scorer.update_hud([("★★ MOUTH CORNERS PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg
+
+                moved = []
+                if not vert_done:
+                    # ---- Phase 1: 竖向 ----
+                    if vert_ok:
+                        vert_done = True
+                        print(f"  [Corner-VERT {iteration:3d}] ★ 竖向收敛，进入水平阶段")
+                        continue
+                    if not L_dy_ok:
+                        s = v_flip if L_dy > 0 else -v_flip
+                        self._move_one(ch_Lv, s * step, ranges, current, moved, "A23")
+                    if not R_dy_ok:
+                        s = -v_flip if R_dy > 0 else v_flip
+                        self._move_one(ch_Rv, s * step, ranges, current, moved, "A25")
+                else:
+                    # ---- Phase 2: 水平 ----
+                    if not L_dx_ok:
+                        s = h_flip if L_dx > 0 else -h_flip
+                        self._move_one(ch_Lh, s * step, ranges, current, moved, "A24")
+                    if not R_dx_ok:
+                        s = h_flip if R_dx > 0 else -h_flip
+                        self._move_one(ch_Rh, s * step, ranges, current, moved, "A22")
+
+                if moved:
+                    print(f"  [Corner-{phase} {iteration:3d}] -> " + " ".join(moved))
+                else:
+                    print(f"  [Corner-{phase} {iteration:3d}] 已达极限")
+                _wait()
+
+            print(f"\n{'='*60}")
+            print(f"  ✘ 嘴角未通过 ({'竖向' if not vert_done else '水平'})")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    def _move_one(self, ch: int, delta: float, ranges: dict, current: dict,
+                  moved: list, label: str):
+        """单通道移动，自动 clamp。返回新角度；已到极限则不动。"""
+        lo, hi = ranges[ch]
+        new_angle = round(current[ch] + delta)
+        new_angle = max(lo, min(hi, new_angle))
+        if new_angle == current[ch]:
+            return current[ch]
+        self.send_servo(ch, new_angle, (lo, hi))
+        current[ch] = new_angle
+        moved.append(f"{label}={new_angle}°")
+        return new_angle
+
+    # ==================================================================
+    # 多帧采集 + 修剪平均 — 上唇 ULR
+    # ==================================================================
+
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"ulr", "delta", "qualified"}
+        """
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []  # list of (abs_delta, signal_dict)
+        collected = 0
+        no_face_count = 0
+
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+
+            ok, frame = self.scorer.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.scorer.detect(frame)
+            signal = self.scorer.get_upper_lip_signal()
+
+            if signal is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            samples.append((abs(signal["delta"]), {
+                "ulr": signal["ulr"],
+                "delta": signal["delta"],
+            }))
+            collected += 1
+
+            self.scorer.update_hud([
+                (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+            ])
+
+        self.scorer.enable_mp = False
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+
+        n = len(trimmed)
+        avg = {
+            "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
+            "delta": sum(s[1]["delta"] for s in trimmed) / n,
+        }
+        tol = UPPER_LIP_ULR_TOLERANCE
+        avg["qualified"] = abs(avg["delta"]) <= tol
+
+        all_devs = [s[0] for s in samples]
+        print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
+              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
+
+        return avg
+
+    # ==================================================================
+    # 引导式自动调整 — 上唇 (A16)
+    # ==================================================================
+
+    def auto_adjust_upper_lip(
+        self,
+        ulr_step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        引导式自动调整 — 只调整 A16 中上嘴唇舵机。
+
+        流程（每轮迭代）:
+          1. 打开 MP → 采集 60 帧 ULR → 关闭 MP
+          2. 若 ULR 偏差 ≤ 容差 → 通过
+          3. 否则移动 A16 → 等待 → 下一轮
+
+        Args:
+            ulr_step:       每次调整的舵机角度步长 (默认 1°)
+            max_iterations: 最大迭代次数
+            wait_seconds:   每轮等待秒数
+            keep_display:   完成后是否保持窗口
+
+        Returns:
+            (passed: bool, iterations: int, final_data: dict)
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        if self.scorer.upper_lip_baseline is None:
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            return False, 0, {}
+
+        tol = UPPER_LIP_ULR_TOLERANCE
+
+        print(f"{'='*60}")
+        print(f"  引导式自动调整 (仅中上嘴唇 A16)")
+        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 ULR")
+        print(f"  步长: {ulr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  目标: ULR 偏差 ≤ {tol}")
+        bl = self.scorer.upper_lip_baseline
+        print(f"  基线: ULR={bl['ulr']:.4f}")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+
+        # 获取 A16 的范围
+        ch = UPPER_LIP_CHANNEL
+        start = self.controller.list_start_deg[ch]
+        end = self.controller.list_end_deg[ch]
+        ul_range = (min(start, end), max(start, end))
+        ul_sign = getattr(self, '_upper_lip_flip', 1)   # 默认: ULR小→增大角度
+
+        current_angle = self.controller.list_temp_deg[ch]
+        print(f"  初始角度: A16={current_angle}° (range=[{ul_range[0]}, {ul_range[1]}])")
+
+        iteration = 0
+        sleep_chunk = 0.1
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                # ---- 采集 ULR ----
+                avg_signal = self.collect_upper_lip_samples(n_frames=60, trim=10)
+
+                if avg_signal is None:
+                    print(f"  [UpperLip Iter {iteration:3d}] 无法获取有效帧")
+                    _waited = 0
+                    while _waited < wait_seconds:
+                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                        _waited += sleep_chunk
+                        if self.scorer.user_pressed_stop:
+                            break
+                    continue
+
+                ulr = avg_signal["ulr"]
+                delta = avg_signal["delta"]
+
+                print(f"  [UpperLip Iter {iteration:3d}] ULR={ulr:.4f} (Δ={delta:+.4f})")
+
+                # ---- 检查是否已合格 ----
+                if abs(delta) <= tol:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 上唇调整通过! 共迭代 {iteration} 次")
+                    print(f"      ULR={ulr:.4f} (基线={bl['ulr']:.4f})")
+                    print(f"      A16={current_angle}°")
+                    print(f"{'='*60}\n")
+
+                    # 保存结果
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    chin_angle = self._temp_deg(MOUTH_CHIN_CHANNEL)
+                    ll_angle = self._temp_deg(LOWER_LIP_CHANNEL)
+                    self.export_angle_config(all_angles,
+                                            chin_angle=chin_angle,
+                                            lower_lip_angle=ll_angle,
+                                            upper_lip_angle=current_angle)
+
+                    self.scorer.update_hud([("★★ UPPER LIP PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg_signal
+
+                # ---- 移动 A16 ----
+                # delta>0 → ULR太大(上唇太展) → 合(-1); delta<0 → ULR太小(上唇太收) → 开(+1)
+                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
+                move = ul_sign * delta_sign * ulr_step
+                new_angle = round(current_angle + move)
+                new_angle = max(ul_range[0], min(ul_range[1], new_angle))
+                self.send_servo(ch, new_angle, ul_range)
+                current_angle = new_angle
+                print(f"  [UpperLip Iter {iteration:3d}] 移动 A16={new_angle}° "
+                      f"(ULR Δ={delta:+.4f}, Δangle={move:+.1f})")
+
+                # ---- 等待 ----
+                _waited = 0
+                while _waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
+                    _waited += sleep_chunk
+                    self.scorer.update_hud([
+                        (f"[UpperLip Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
+                    ])
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            # 达到最大迭代未通过
+            print(f"\n{'='*60}")
+            print(f"  ✘ 上唇未在 {max_iterations} 次迭代内通过")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
     # ==================================================================
     # 结果保存
     # ==================================================================
@@ -958,7 +2789,9 @@ class EyeAutoTuner:
         print(f"[INFO] 结果已保存 → {save_path}")
         return result
 
-    def export_angle_config(self, angles: List[int], eyebrow_angles: dict = None):
+    def export_angle_config(self, angles: List[int], eyebrow_angles: dict = None,
+                            chin_angle: int = None, lower_lip_angle: int = None,
+                            upper_lip_angle: int = None, corner_angles: dict = None):
         """导出角度配置到 eye_angles_best.json"""
         config = {
             "description": "EyeAutoTuner 眼睛舵机角度配置",
@@ -982,11 +2815,82 @@ class EyeAutoTuner:
             config["quick_apply"]["angles"] = config["quick_apply"]["angles"] + [
                 eyebrow_angles[c] for c in EYEBROW_CHANNELS
             ]
+        # 下巴通道 (如有)
+        if chin_angle is not None:
+            config["chin_angle"] = {"channel": MOUTH_CHIN_CHANNEL, "angle": chin_angle}
+            config["quick_apply"]["indexes"].append(MOUTH_CHIN_CHANNEL)
+            config["quick_apply"]["angles"].append(chin_angle)
+        # 下唇通道 (如有)
+        if lower_lip_angle is not None:
+            config["lower_lip_angle"] = {"channel": LOWER_LIP_CHANNEL, "angle": lower_lip_angle}
+            config["quick_apply"]["indexes"].append(LOWER_LIP_CHANNEL)
+            config["quick_apply"]["angles"].append(lower_lip_angle)
+        # 上唇通道 (如有)
+        if upper_lip_angle is not None:
+            config["upper_lip_angle"] = {"channel": UPPER_LIP_CHANNEL, "angle": upper_lip_angle}
+            config["quick_apply"]["indexes"].append(UPPER_LIP_CHANNEL)
+            config["quick_apply"]["angles"].append(upper_lip_angle)
+        # 嘴角通道 (如有)
+        if corner_angles:
+            config["corner_angles"] = corner_angles
+            for ch_data in corner_angles.values():
+                if isinstance(ch_data, dict):
+                    config["quick_apply"]["indexes"].append(ch_data["channel"])
+                    config["quick_apply"]["angles"].append(ch_data["angle"])
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "eye_angles_best.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
         print(f"[INFO] 角度配置已导出 → {path}")
+
+    def export_full_best_config(self):
+        """全量 27 个舵机最优配置：从 YAML 读原始 temp_deg，与当前值对比后保存。
+
+        保存为 best_servo_config.json，每通道含:
+          name, channel, info, range, original_deg, tuned_deg, delta
+        """
+        yaml_path = self.controller.yaml_file
+        original = read_yaml(yaml_path)
+        servo_info = original.get("SERVO_INFO", original)
+
+        servos = []
+        for name in servo_info:
+            si = servo_info[name]
+            ch = si["channel_idx"]
+            orig = si["temp_deg"]
+            tuned = self.controller.list_temp_deg[ch]
+            servos.append({
+                "name": name,
+                "channel": ch,
+                "info": si.get("info", name),
+                "range": [si["start_deg"], si["end_deg"]],
+                "original_deg": orig,
+                "tuned_deg": tuned,
+                "delta": tuned - orig,
+            })
+
+        out = {
+            "description": "全量 27 通道舵机调优最佳配置",
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "yaml_source": os.path.basename(yaml_path),
+            "servos": servos,
+        }
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "best_servo_config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, ensure_ascii=False)
+        print(f"[INFO] 全量最优配置已导出 → {path}")
+
+        # 打印 delta 摘要
+        changed = [s for s in servos if s["delta"] != 0]
+        if changed:
+            print("  变化列表:")
+            for s in changed:
+                arrow = "↑" if s["delta"] > 0 else "↓"
+                print(f"    {s['name']}: {s['original_deg']}° → {s['tuned_deg']}° ({arrow}{abs(s['delta'])})")
+        else:
+            print("  (无变化)")
 
     # ==================================================================
     # 清理
@@ -1061,7 +2965,7 @@ def main():
     # 眉毛模式参数
     parser.add_argument("--ebhr-step", type=float, default=1.0,
                        help="眉毛每次调整步长(deg) (默认: 1.0)")
-    parser.add_argument("--eyebrow-max-iter", type=int, default=30,
+    parser.add_argument("--eyebrow-max-iter", type=int, default=100,
                        help="眉毛调整最大迭代次数 (默认: 30)")
     parser.add_argument("--eyebrow-wait", type=float, default=1.0,
                        help="眉毛每轮等待秒数 (默认: 1.0)")
@@ -1069,6 +2973,48 @@ def main():
                        help="翻转 A0 舵机方向符号")
     parser.add_argument("--eyebrow-a1-flip", action="store_true",
                        help="翻转 A1 舵机方向符号")
+
+    # 嘴部下巴模式参数
+    parser.add_argument("--mar-step", type=float, default=1.0,
+                       help="下巴每次调整步长(deg) (默认: 1.0)")
+    parser.add_argument("--mouth-max-iter", type=int, default=100,
+                       help="下巴调整最大迭代次数 (默认: 30)")
+    parser.add_argument("--mouth-wait", type=float, default=1.0,
+                       help="下巴每轮等待秒数 (默认: 1.0)")
+    parser.add_argument("--mouth-chin-flip", action="store_true",
+                       help="翻转 A26 舵机方向符号")
+
+    # 下唇模式参数
+    parser.add_argument("--ll-step", type=float, default=1.0,
+                       help="下唇每次调整步长(deg) (默认: 1.0)")
+    parser.add_argument("--ll-max-iter", type=int, default=100,
+                       help="下唇调整最大迭代次数 (默认: 30)")
+    parser.add_argument("--ll-wait", type=float, default=1.0,
+                       help="下唇每轮等待秒数 (默认: 1.0)")
+    parser.add_argument("--ll-flip", action="store_true",
+                       help="翻转 A19 舵机方向符号")
+
+    # 嘴角模式参数 (A22-A25)
+    parser.add_argument("--corner-step", type=float, default=1.0,
+                       help="嘴角每次调整步长(deg) (默认: 1.0)")
+    parser.add_argument("--corner-max-iter", type=int, default=100,
+                       help="嘴角调整最大迭代次数 (默认: 30)")
+    parser.add_argument("--corner-wait", type=float, default=1.0,
+                       help="嘴角每轮等待秒数 (默认: 1.0)")
+    parser.add_argument("--corner-horiz-flip", action="store_true",
+                       help="翻转嘴角水平对(A22+A24)方向符号")
+    parser.add_argument("--corner-vert-flip", action="store_true",
+                       help="翻转嘴角垂直对(A23+A25)方向符号")
+
+    # 上唇模式参数
+    parser.add_argument("--ulr-step", type=float, default=1.0,
+                       help="上唇每次调整步长(deg) (默认: 1.0)")
+    parser.add_argument("--ul-max-iter", type=int, default=100,
+                       help="上唇调整最大迭代次数 (默认: 30)")
+    parser.add_argument("--ul-wait", type=float, default=1.0,
+                       help="上唇每轮等待秒数 (默认: 1.0)")
+    parser.add_argument("--ul-flip", action="store_true",
+                       help="翻转 A16 舵机方向符号")
 
     args = parser.parse_args()
 
@@ -1097,102 +3043,170 @@ def main():
         tuner.initialize()
 
         if mode == "eyeball":
-            has_eyelid_bl = tuner.scorer.eyelid_baseline is not None
+            has_upper_lip_bl = tuner.scorer.upper_lip_baseline is not None
+            has_mouth_bl = tuner.scorer.mouth_baseline is not None
+            has_corners_bl = tuner.scorer.mouth_corners_baseline is not None
+            has_lower_lip_bl = tuner.scorer.lower_lip_baseline is not None
             has_eyebrow_bl = tuner.scorer.eyebrow_baseline is not None
+            has_eyelid_bl = tuner.scorer.eyelid_baseline is not None
+            has_after = has_upper_lip_bl or has_mouth_bl or has_corners_bl \
+                        or has_lower_lip_bl or has_eyebrow_bl or has_eyelid_bl
             passed, iterations, _ = tuner.auto_adjust(
                 pixel_to_degree=args.ratio,
                 max_iterations=args.max_iter,
                 wait_seconds=args.wait,
-                keep_display=has_eyelid_bl or has_eyebrow_bl,
+                keep_display=has_after,
             )
             if passed:
                 print(f"\n[眼球完成] 共 {iterations} 次迭代，固定眼球舵机。")
 
-                # ---- 自动进入眼皮调整 ----
-                if tuner.scorer.eyelid_baseline is None:
+                # ---- 上唇调整 (A16) ----
+                passed_ul = False
+                iter_ul = 0
+                if not has_upper_lip_bl:
+                    print("[WARN] 未加载上唇基线，跳过上唇调整。")
+                else:
+                    print("\n>>> 自动进入上唇调整 (A16) ...\n")
+                    tuner._upper_lip_flip = 1 if args.ul_flip else 1
+                    passed_ul, iter_ul, _ = tuner.auto_adjust_upper_lip(
+                        ulr_step=args.ulr_step,
+                        max_iterations=args.ul_max_iter,
+                        wait_seconds=args.ul_wait,
+                        keep_display=has_mouth_bl or has_corners_bl or has_lower_lip_bl or has_eyebrow_bl or has_eyelid_bl,
+                    )
+                    if passed_ul:
+                        print(f"[上唇完成] A16, {iter_ul}次")
+                    else:
+                        print(f"[上唇未通过] A16, {iter_ul}次")
+
+                # ---- 下巴调整 (A26) ----
+                passed_chin = False
+                iter_chin = 0
+                if not has_mouth_bl:
+                    print("[WARN] 未加载嘴部基线，跳过下巴调整。")
+                else:
+                    print("\n>>> 自动进入下巴调整 (A26) ...\n")
+                    tuner._mouth_chin_flip = -1 if args.mouth_chin_flip else 1
+                    passed_chin, iter_chin, _ = tuner.auto_adjust_mouth_chin(
+                        mar_step=args.mar_step,
+                        max_iterations=args.mouth_max_iter,
+                        wait_seconds=args.mouth_wait,
+                        keep_display=has_corners_bl or has_lower_lip_bl or has_eyebrow_bl or has_eyelid_bl,
+                    )
+                    if passed_chin:
+                        print(f"[下巴完成] A26, {iter_chin}次")
+                    else:
+                        print(f"[下巴未通过] A26, {iter_chin}次")
+
+                # ---- 嘴角调整 (A22-A25) ----
+                passed_corner = False
+                iter_corner = 0
+                if not has_corners_bl:
+                    print("[WARN] 未加载嘴角基线，跳过嘴角调整。")
+                else:
+                    print("\n>>> 自动进入嘴角调整 (A22-A25) ...\n")
+                    tuner._corner_horiz_flip = args.corner_horiz_flip
+                    tuner._corner_vert_flip = args.corner_vert_flip
+                    passed_corner, iter_corner, _ = tuner.auto_adjust_mouth_corners(
+                        step=args.corner_step,
+                        max_iterations=args.corner_max_iter,
+                        wait_seconds=args.corner_wait,
+                        keep_display=has_lower_lip_bl or has_eyebrow_bl or has_eyelid_bl,
+                    )
+                    if passed_corner:
+                        print(f"[嘴角完成] A22-A25, {iter_corner}次")
+                    else:
+                        print(f"[嘴角未通过] A22-A25, {iter_corner}次")
+
+                # ---- 下唇调整 (A19) ----
+                passed_ll = False
+                iter_ll = 0
+                if not has_lower_lip_bl:
+                    print("[WARN] 未加载下唇基线，跳过下唇调整。")
+                else:
+                    print("\n>>> 自动进入下唇调整 (A19) ...\n")
+                    tuner._lower_lip_flip = 1 if args.ll_flip else -1
+                    passed_ll, iter_ll, _ = tuner.auto_adjust_lower_lip(
+                        step=args.ll_step,
+                        max_iterations=args.ll_max_iter,
+                        wait_seconds=args.ll_wait,
+                        keep_display=has_eyebrow_bl or has_eyelid_bl,
+                    )
+                    if passed_ll:
+                        print(f"[下唇完成] A19, {iter_ll}次")
+                    else:
+                        print(f"[下唇未通过] A19, {iter_ll}次")
+
+                # ---- 眉毛调整 (A0-A1) ----
+                passed_eb = False
+                iter_eb = 0
+                if not has_eyebrow_bl:
+                    print("[WARN] 未加载眉毛基线，跳过眉毛调整。")
+                else:
+                    print("\n>>> 自动进入眉毛调整 (A0-A1) ...\n")
+                    tuner._eyebrow_a0_flip = 1 if args.eyebrow_a0_flip else -1
+                    tuner._eyebrow_a1_flip = 1 if args.eyebrow_a1_flip else -1
+                    passed_eb, iter_eb, _ = tuner.auto_adjust_eyebrow(
+                        ebhr_step=args.ebhr_step,
+                        max_iterations=args.eyebrow_max_iter,
+                        wait_seconds=args.eyebrow_wait,
+                        keep_display=has_eyelid_bl,
+                    )
+                    if passed_eb:
+                        print(f"[眉毛完成] A0-A1, {iter_eb}次")
+                    else:
+                        print(f"[眉毛未通过] A0-A1, {iter_eb}次")
+
+                # ---- 眼皮调整 (A8-A9) ----
+                passed_el = False
+                iter_el = 0
+                if not has_eyelid_bl:
                     print("[WARN] 未加载眼皮基线，跳过眼皮调整。")
-                    passed2 = False
                 else:
                     print("\n>>> 自动进入眼皮调整 (A8-A9) ...\n")
                     tuner._eyelid_a8_flip = 1 if args.eyelid_a8_flip else -1
                     tuner._eyelid_a9_flip = -1 if args.eyelid_a9_flip else 1
-                    passed2, iter2, _ = tuner.auto_adjust_eyelid(
+                    passed_el, iter_el, _ = tuner.auto_adjust_eyelid(
                         ear_step=args.ear_step,
                         max_iterations=args.eyelid_max_iter,
                         wait_seconds=args.eyelid_wait,
                         keep_display=True,
                     )
-
-                if passed2:
-                    # 眼皮通过 → 自动进入眉毛调整
-                    iter3 = 0
-                    passed3 = False
-                    if tuner.scorer.eyebrow_baseline is None:
-                        print("[WARN] 未加载眉毛基线，跳过眉毛调整。")
+                    if passed_el:
+                        print(f"[眼皮完成] A8-A9, {iter_el}次")
                     else:
-                        print("\n>>> 自动进入眉毛调整 (A0-A1) ...\n")
-                        tuner._eyebrow_a0_flip = 1 if args.eyebrow_a0_flip else -1
-                        tuner._eyebrow_a1_flip = 1 if args.eyebrow_a1_flip else -1
-                        passed3, iter3, _ = tuner.auto_adjust_eyebrow(
-                            ebhr_step=args.ebhr_step,
-                            max_iterations=args.eyebrow_max_iter,
-                            wait_seconds=args.eyebrow_wait,
-                            keep_display=True,
-                        )
+                        print(f"[眼皮未通过] A8-A9, {iter_el}次")
 
-                    # 眉毛调完了，重新调一次眼皮（眉毛会牵动眼皮）
-                    print("\n>>> 眉毛完成，重新校准眼皮 (A8-A9) ...\n")
-                    passed2f, iter2f, _ = tuner.auto_adjust_eyelid(
-                        ear_step=args.ear_step,
-                        max_iterations=args.eyelid_max_iter,
-                        wait_seconds=args.eyelid_wait,
-                        keep_display=True,
-                    )
-                    if passed2f and passed3:
-                        print(f"\nDone! 眼球+眼皮+眉毛+眼皮校准 全部完成 "
-                              f"(眼球{iterations}次, 眼皮{iter2}次, 眉毛{iter3}次, 眼皮校准{iter2f}次)。")
-                    elif passed2f:
-                        print(f"\n眼球+眼皮+眼皮校准完成，眉毛未通过 "
-                              f"(眼球{iterations}次, 眼皮{iter2}次, 眉毛{iter3}次, 眼皮校准{iter2f}次)。")
-                    else:
-                        print(f"\n眼皮最终校准未通过 "
-                              f"(眼球{iterations}次, 眼皮{iter2}次, 眉毛{iter3}次, 眼皮校准{iter2f}次)。")
-                else:
-                    if tuner.scorer.eyelid_baseline is not None:
-                        print(f"\n眼球通过但眼皮未通过 (眼球{iterations}次, 眼皮{iter2}次)。")
-                    # 即使眼皮未通过，如果有眉毛基线也尝试调眉毛
-                    iter3 = 0
-                    passed3 = False
-                    if tuner.scorer.eyebrow_baseline is not None:
-                        print("\n>>> 跳过眼皮，直接进入眉毛调整 (A0-A1) ...\n")
-                        tuner._eyebrow_a0_flip = 1 if args.eyebrow_a0_flip else -1
-                        tuner._eyebrow_a1_flip = 1 if args.eyebrow_a1_flip else -1
-                        passed3, iter3, _ = tuner.auto_adjust_eyebrow(
-                            ebhr_step=args.ebhr_step,
-                            max_iterations=args.eyebrow_max_iter,
-                            wait_seconds=args.eyebrow_wait,
-                            keep_display=True,
-                        )
+                # ---- 汇总 ----
+                parts = ["眼球"]
+                iters = [iterations]
+                if has_upper_lip_bl:
+                    parts.append("上唇"); iters.append(iter_ul)
+                if has_mouth_bl:
+                    parts.append("下巴"); iters.append(iter_chin)
+                if has_corners_bl:
+                    parts.append("嘴角"); iters.append(iter_corner)
+                if has_lower_lip_bl:
+                    parts.append("下唇"); iters.append(iter_ll)
+                if has_eyebrow_bl:
+                    parts.append("眉毛"); iters.append(iter_eb)
+                if has_eyelid_bl:
+                    parts.append("眼皮"); iters.append(iter_el)
+                all_ok = passed and (not has_upper_lip_bl or passed_ul) \
+                         and (not has_mouth_bl or passed_chin) \
+                         and (not has_corners_bl or passed_corner) \
+                         and (not has_lower_lip_bl or passed_ll) \
+                         and (not has_eyebrow_bl or passed_eb) \
+                         and (not has_eyelid_bl or passed_el)
+                iter_str = " ".join(f"{p}({i}次)" for p, i in zip(parts, iters))
+                print(f"\n{'All DONE!' if all_ok else '部分完成'}: {iter_str}")
 
-                    # 眉毛调完，如果有眼皮基线就重新校准眼皮
-                    if tuner.scorer.eyelid_baseline is not None:
-                        print("\n>>> 眉毛完成，重新校准眼皮 (A8-A9) ...\n")
-                        passed2f, iter2f, _ = tuner.auto_adjust_eyelid(
-                            ear_step=args.ear_step,
-                            max_iterations=args.eyelid_max_iter,
-                            wait_seconds=args.eyelid_wait,
-                            keep_display=True,
-                        )
-                        if passed2f:
-                            print(f"\nDone! 眼球+眉毛+眼皮校准完成 "
-                                  f"(眼球{iterations}次, 眉毛{iter3}次, 眼皮校准{iter2f}次)。")
-                        else:
-                            print(f"\n仅眼球通过，眉毛{iter3}次，眼皮校准未通过 ({iter2f}次)。")
-                    else:
-                        print(f"\nDone! 眼球+眉毛完成 (眼球{iterations}次, 眉毛{iter3}次)。")
-                # 链式完成，等用户按 Q 退出
+                # ---- 保存全量最优配置 ----
+                tuner.export_full_best_config()
+
+                # 完成，等用户按 Q 退出
                 print("\n[提示] 所有调整完成，按 Q 退出...")
-                tuner.scorer._user_key = None  # 清除旧按键
+                tuner.scorer._user_key = None
                 while not tuner.scorer.user_pressed_stop:
                     tuner.scorer.update_hud([("★★ ALL DONE ★★  Press Q to quit", (100, 60), (0, 255, 0))])
                     time.sleep(0.1)

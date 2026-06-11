@@ -19,6 +19,10 @@ WEIGHTS_PATH = os.path.join(ELLSEG_REPO, "weights", "all.git_ok")
 FACE_POINTS_FILE = os.path.join(DIR, "face_points.json")
 EYELID_BASELINE_FILE = os.path.join(DIR, "eyelid_baseline.json")
 EYEBROW_BASELINE_FILE = os.path.join(DIR, "eyebrow_baseline.json")
+MOUTH_BASELINE_FILE = os.path.join(DIR, "mouth_baseline.json")
+LOWER_LIP_BASELINE_FILE = os.path.join(DIR, "lower_lip_baseline.json")
+UPPER_LIP_BASELINE_FILE = os.path.join(DIR, "upper_lip_baseline.json")
+MOUTH_CORNERS_BASELINE_FILE = os.path.join(DIR, "mouth_corners_baseline.json")
 
 from eye_constants import EYEBALL_OFFSET_TOLERANCE
 TOLERANCE = EYEBALL_OFFSET_TOLERANCE        # 合格阈值 (像素)
@@ -278,6 +282,120 @@ def load_eyebrow_baseline(filepath=None):
 
 
 # ============================================================
+# 嘴部基线管理
+# ============================================================
+def save_mouth_baseline(mar, filepath=None):
+    if filepath is None:
+        filepath = MOUTH_BASELINE_FILE
+    data = {"mar": float(mar)}
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[Mouth Baseline] Saved: MAR={mar:.4f}")
+
+
+def load_mouth_baseline(filepath=None):
+    if filepath is None:
+        filepath = MOUTH_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"mar": float(d["mar"])}
+    except Exception as e:
+        print(f"[Mouth Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
+# 下唇基线管理
+# ============================================================
+def save_lower_lip_baseline(llr, filepath=None):
+    if filepath is None:
+        filepath = LOWER_LIP_BASELINE_FILE
+    data = {"llr": float(llr)}
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[LowerLip Baseline] Saved: LLR={llr:.4f}")
+
+def load_lower_lip_baseline(filepath=None):
+    if filepath is None:
+        filepath = LOWER_LIP_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        # 兼容旧格式 {llt, llp}
+        if "llr" in d:
+            return {"llr": float(d["llr"])}
+        else:
+            return None
+    except Exception as e:
+        print(f"[LowerLip Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
+# 上唇基线管理
+# ============================================================
+def save_upper_lip_baseline(ulr, filepath=None):
+    if filepath is None:
+        filepath = UPPER_LIP_BASELINE_FILE
+    data = {"ulr": float(ulr)}
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[UpperLip Baseline] Saved: ULR={ulr:.4f}")
+
+def load_upper_lip_baseline(filepath=None):
+    if filepath is None:
+        filepath = UPPER_LIP_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        return {"ulr": float(d["ulr"])}
+    except Exception as e:
+        print(f"[UpperLip Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
+# 嘴角基线管理 — A22-A25
+# ============================================================
+def save_mouth_corners_baseline(nose_pos, left_corner_pos, right_corner_pos, filepath=None):
+    if filepath is None:
+        filepath = MOUTH_CORNERS_BASELINE_FILE
+    data = {
+        "nose": list(nose_pos),
+        "corner_left": list(left_corner_pos),
+        "corner_right": list(right_corner_pos),
+    }
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"[MouthCorners Baseline] Saved: nose={nose_pos} L_corner={left_corner_pos} R_corner={right_corner_pos}")
+
+
+def load_mouth_corners_baseline(filepath=None):
+    if filepath is None:
+        filepath = MOUTH_CORNERS_BASELINE_FILE
+    if not os.path.isfile(filepath):
+        return None
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            d = json.load(f)
+        return {
+            "nose": tuple(d["nose"]),
+            "corner_left": tuple(d["corner_left"]),
+            "corner_right": tuple(d["corner_right"]),
+        }
+    except Exception as e:
+        print(f"[MouthCorners Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
 # 主类
 # ============================================================
 class EllSegDetector:
@@ -302,6 +420,7 @@ class EllSegDetector:
         # 检测模块开关
         self.enable_mp = False        # MediaPipe 人脸关键点检测
         self.enable_ellseg = False    # EllSeg 虹膜椭圆检测
+        self.show_all_landmarks = False  # 显示所有 MediaPipe 关键点
 
         print("[Detector] Initializing MediaPipe...")
         self.landmarker = _init_mediapipe()
@@ -353,6 +472,40 @@ class EllSegDetector:
             print(f"  R_EBHR = {self.eyebrow_baseline['right_ebhr']:.4f}")
         else:
             print("[Eyebrow Baseline] No eyebrow baseline found.")
+
+        # 嘴部基线
+        self.mouth_baseline = load_mouth_baseline()
+        if self.mouth_baseline:
+            print(f"[Mouth Baseline] Loaded from {MOUTH_BASELINE_FILE}")
+            print(f"  MAR = {self.mouth_baseline['mar']:.4f}")
+        else:
+            print("[Mouth Baseline] No mouth baseline found.")
+
+        # 下唇基线
+        self.lower_lip_baseline = load_lower_lip_baseline()
+        if self.lower_lip_baseline:
+            print(f"[LowerLip Baseline] Loaded from {LOWER_LIP_BASELINE_FILE}")
+            print(f"  LLR = {self.lower_lip_baseline['llr']:.4f}")
+        else:
+            print("[LowerLip Baseline] No lower lip baseline found.")
+
+        # 上唇基线
+        self.upper_lip_baseline = load_upper_lip_baseline()
+        if self.upper_lip_baseline:
+            print(f"[UpperLip Baseline] Loaded from {UPPER_LIP_BASELINE_FILE}")
+            print(f"  ULR = {self.upper_lip_baseline['ulr']:.4f}")
+        else:
+            print("[UpperLip Baseline] No upper lip baseline found.")
+
+        # 嘴角基线
+        self.mouth_corners_baseline = load_mouth_corners_baseline()
+        if self.mouth_corners_baseline:
+            print(f"[MouthCorners Baseline] Loaded from {MOUTH_CORNERS_BASELINE_FILE}")
+            print(f"  nose   = {self.mouth_corners_baseline['nose']}")
+            print(f"  L_corner = {self.mouth_corners_baseline['corner_left']}")
+            print(f"  R_corner = {self.mouth_corners_baseline['corner_right']}")
+        else:
+            print("[MouthCorners Baseline] No mouth corners baseline found.")
 
         self._timestamp = 0
         self.last_result = None
@@ -445,6 +598,11 @@ class EllSegDetector:
                                    (0, 255, 0) if d <= TOLERANCE else (0, 0, 255), 1)
                     y += 18
 
+                # mp0(人中) 实时坐标 — 画面左侧
+                if hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    mp0 = self._last_lms_smooth[0]
+                    cv2.putText(img, f"mp0:({mp0[0]:.0f},{mp0[1]:.0f})", (10, 400), 0, 0.35, (255, 200, 0), 1)
+
                 # FPS 显示 (来自主采集线程的实际捕获速率)
                 cap_fps = self._capture_fps
                 cv2.putText(img, f"Cap FPS: {cap_fps:.1f}", (img.shape[1] - 170, 22),
@@ -484,6 +642,58 @@ class EllSegDetector:
                                    (10, y_brow + 16), 0, 0.35,
                                    (0, 255, 0) if r_ok else (0, 0, 255), 1)
 
+                # MAR 嘴部高宽比 (如果有基线)
+                if self.mouth_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_mouth_signal()
+                    if signal:
+                        bl = self.mouth_baseline
+                        mar = signal["mar"]
+                        ok = signal["qualified"]
+                        y_mouth = 150
+                        cv2.putText(img, f"MAR={mar:.3f} (bl={bl['mar']:.3f})",
+                                   (10, y_mouth), 0, 0.35,
+                                   (0, 255, 0) if ok else (0, 0, 255), 1)
+
+                # LLR 下唇比例 (如果有基线)
+                if self.lower_lip_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_lower_lip_signal()
+                    if signal:
+                        bl = self.lower_lip_baseline
+                        ok = signal["qualified"]
+                        y_ll = 168
+                        cv2.putText(img, f"LLR={signal['llr']:.3f} (bl={bl['llr']:.3f})",
+                                   (10, y_ll), 0, 0.35,
+                                   (0, 255, 0) if ok else (0, 0, 255), 1)
+
+                # ULR 上唇比例 (如果有基线)
+                if self.upper_lip_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_upper_lip_signal()
+                    if signal:
+                        bl = self.upper_lip_baseline
+                        ok = signal["qualified"]
+                        y_ul = 202
+                        cv2.putText(img, f"ULR={signal['ulr']:.3f} (bl={bl['ulr']:.3f})",
+                                   (10, y_ul), 0, 0.35,
+                                   (0, 255, 0) if ok else (0, 0, 255), 1)
+
+                # 嘴角偏移 HUD (如果有基线)
+                if self.mouth_corners_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_mouth_corner_signal()
+                    if signal:
+                        y_mc = 220
+                        cv2.putText(img, "MouthCorner:",
+                                   (10, y_mc), 0, 0.35, (255, 200, 0), 1)
+                        y_mc += 16
+                        for label, key in [("L", "left"), ("R", "right")]:
+                            d = signal.get(key, {})
+                            dx, dy, dist = d.get("dx", 0), d.get("dy", 0), d.get("dist", 0)
+                            ok = d.get("qualified", False)
+                            cv2.putText(img,
+                                       f"  {label}:dX={dx:+.1f} dY={dy:+.1f} d={dist:.1f}px",
+                                       (10, y_mc), 0, 0.35,
+                                       (0, 255, 0) if ok else (0, 0, 255), 1)
+                            y_mc += 16
+
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
                 if timing:
@@ -496,10 +706,18 @@ class EllSegDetector:
                 for text, pos, color in self._disp_extra_texts:
                     cv2.putText(img, text, pos, 0, 0.45, color, 1)
 
+                # 显示所有 MediaPipe 关键点
+                if self.show_all_landmarks and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    lms = self._last_lms_smooth
+                    for i in range(lms.shape[0]):
+                        px, py = int(lms[i, 0]), int(lms[i, 1])
+                        cv2.circle(img, (px, py), 1, (180, 180, 255), -1)
+                        cv2.putText(img, str(i), (px + 2, py - 1), 0, 0.22, (180, 180, 255), 1)
+
                 cv2.imshow("EllSeg Detect", img)
 
                 # 检测开关 HUD
-                status_str = f"[1]MP:{'ON' if self.enable_mp else 'OFF'}  [2]ELL:{'ON' if self.enable_ellseg else 'OFF'}"
+                status_str = f"[1]MP:{'ON' if self.enable_mp else 'OFF'}  [2]ELL:{'ON' if self.enable_ellseg else 'OFF'}  [3]LMS:{'ON' if self.show_all_landmarks else 'OFF'}"
                 cv2.putText(img, status_str, (10, img.shape[0] - 8),
                            0, 0.4, (200, 200, 200), 1)
 
@@ -510,6 +728,9 @@ class EllSegDetector:
                     self.toggle_mp()
                 elif key == ord('2'):
                     self.toggle_ellseg()
+                elif key == ord('3'):
+                    self.show_all_landmarks = not self.show_all_landmarks
+                    print(f"[Detector] Show Landmarks: {'ON' if self.show_all_landmarks else 'OFF'}")
                 elif key in (ord('q'), ord('Q'), 27):
                     self._user_key = key
 
@@ -989,6 +1210,393 @@ class EllSegDetector:
         save_eyebrow_baseline(left_ebhr=ebhrs["left"], right_ebhr=ebhrs["right"])
         return True
 
+    # ==================================================================
+    # 上唇 ULR 计算与信号 — A16
+    # ==================================================================
+
+    @staticmethod
+    def _calc_ulr(lms_smooth):
+        """
+        计算 Upper Lip Ratio (上唇中央比例)。
+        ULR = dist(mp0, 眼球中心) / inter_eye_width
+
+        以眼球中心为原点，计算 mp0(人中) 到眼球中点的欧氏距离。
+        用眼间距做分母归一化。
+        """
+        from eye_constants import (
+            UL_LIP_TOP,
+            UL_IRIS_LEFT, UL_IRIS_RIGHT,
+            UL_NORM_LEFT, UL_NORM_RIGHT,
+            UL_NORM_LEFT2, UL_NORM_RIGHT2,
+        )
+        import numpy as np
+
+        # mp0(人中) 到眼球中点(左右虹膜均值) 的欧氏距离
+        mp0 = lms_smooth[UL_LIP_TOP]
+        iris_left = lms_smooth[UL_IRIS_LEFT]
+        iris_right = lms_smooth[UL_IRIS_RIGHT]
+        eyeball_mid = (iris_left + iris_right) / 2.0
+        dist = float(np.linalg.norm(mp0 - eyeball_mid))
+
+        # 水平归一化: 取两对参考点的均值，更稳定
+        w1 = abs(lms_smooth[UL_NORM_RIGHT][0] - lms_smooth[UL_NORM_LEFT][0])
+        w2 = abs(lms_smooth[UL_NORM_RIGHT2][0] - lms_smooth[UL_NORM_LEFT2][0])
+        eye_width = (w1 + w2) / 2.0
+
+        if eye_width < 1e-6:
+            return 0.0
+
+        return dist / eye_width
+
+    def get_upper_lip_signal(self, lms_smooth=None):
+        """
+        返回 ULR 信号 — 对比基线 ULR。
+
+        Returns:
+            dict 或 None: {ulr, delta, qualified}
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.upper_lip_baseline is None:
+            return None
+
+        ulr = self._calc_ulr(lms_smooth)
+        bl = self.upper_lip_baseline
+        from eye_constants import UPPER_LIP_ULR_TOLERANCE
+        tol = UPPER_LIP_ULR_TOLERANCE
+        delta = ulr - bl["ulr"]
+
+        return {
+            "ulr": ulr,
+            "delta": delta,
+            "qualified": abs(delta) <= tol,
+        }
+
+    def save_current_upper_lip_baseline(self, lms_smooth=None):
+        """手动保存当前帧的 ULR 值为上唇基线"""
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                print("[UpperLip Baseline] Cannot save: no landmark data")
+                return False
+            lms_smooth = self._last_lms_smooth
+
+        ulr = self._calc_ulr(lms_smooth)
+        self.upper_lip_baseline = {"ulr": ulr}
+        save_upper_lip_baseline(ulr=ulr)
+        return True
+
+    # ==================================================================
+    # 嘴角偏移计算与信号 — A22-A25
+    # ==================================================================
+
+    def get_mouth_corner_signal(self, lms_smooth=None):
+        """
+        返回嘴角像素偏移信号 — 对比嘴角基线 (nose + left_corner + right_corner)。
+
+        复用眼球偏移逻辑：当前像素 vs 基线像素，反方向 = 舵机调整方向。
+
+        Returns:
+            dict 或 None:
+              left:  {dx, dy, dist, qualified, adj_x, adj_y}
+              right: {dx, dy, dist, qualified, adj_x, adj_y}
+              all_qualified: bool
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.mouth_corners_baseline is None:
+            return None
+
+        from eye_constants import (
+            MOUTH_CORNER_LEFT_IDX, MOUTH_CORNER_RIGHT_IDX,
+            MOUTH_CORNER_TOLERANCE,
+        )
+        bl = self.mouth_corners_baseline
+        tol = MOUTH_CORNER_TOLERANCE
+
+        result = {}
+        for side, idx, bl_key in [
+            ("left", MOUTH_CORNER_LEFT_IDX, "corner_left"),
+            ("right", MOUTH_CORNER_RIGHT_IDX, "corner_right"),
+        ]:
+            cur = lms_smooth[idx]  # [x, y]
+            base = bl[bl_key]      # (x, y)
+            dx = float(cur[0] - base[0])
+            dy = float(cur[1] - base[1])
+            dist = float(np.sqrt(dx * dx + dy * dy))
+            qualified = dist <= tol
+            result[side] = {
+                "dx": dx, "dy": dy, "dist": dist,
+                "qualified": qualified,
+                "adj_x": -dx, "adj_y": -dy,  # 反方向 = 舵机调整方向
+            }
+
+        result["all_qualified"] = result["left"]["qualified"] and result["right"]["qualified"]
+        return result
+
+    def save_current_mouth_corners_baseline(self, lms_smooth=None, n_frames=60, trim=20):
+        """多帧采集取中位 → 保存嘴角基线 (抗抖动)。
+
+        Args:
+            n_frames: 采集帧数 (默认 60)
+            trim:     去掉最大/最小帧数 (默认 20)
+        """
+        import numpy as np
+        from eye_constants import (
+            MOUTH_CORNER_LEFT_IDX, MOUTH_CORNER_RIGHT_IDX,
+        )
+
+        if lms_smooth is not None:
+            # 单帧快捷路径 (用于一键保存全部基线 [A])
+            nose = (int(lms_smooth[NOSE_IDX, 0]), int(lms_smooth[NOSE_IDX, 1]))
+            self.mouth_corners_baseline = {
+                "nose": nose,
+                "corner_left": (int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 0]),
+                                int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 1])),
+                "corner_right": (int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 0]),
+                                 int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 1])),
+            }
+            save_mouth_corners_baseline(
+                nose_pos=nose,
+                left_corner_pos=self.mouth_corners_baseline["corner_left"],
+                right_corner_pos=self.mouth_corners_baseline["corner_right"],
+            )
+            return True
+
+        # ---- 多帧采集抗抖动路径 ----
+        if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+            print("[MouthCorners Baseline] Cannot save: no landmark data")
+            return False
+
+        mp_was_on = self.enable_mp
+        self.enable_mp = True
+        self.enable_ellseg = False
+
+        frames_data = []  # [(nose, left, right), ...]
+        collected = 0
+        no_face_count = 0
+
+        print(f"[MouthCorners Baseline] 采集 {n_frames} 帧 (trim={trim})...")
+        while collected < n_frames:
+            ok, frame = self.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.detect(frame)
+            lms = self._last_lms_smooth
+            if lms is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            nose_px = (int(lms[NOSE_IDX, 0]), int(lms[NOSE_IDX, 1]))
+            left_px = (int(lms[MOUTH_CORNER_LEFT_IDX, 0]),
+                       int(lms[MOUTH_CORNER_LEFT_IDX, 1]))
+            right_px = (int(lms[MOUTH_CORNER_RIGHT_IDX, 0]),
+                        int(lms[MOUTH_CORNER_RIGHT_IDX, 1]))
+            frames_data.append((nose_px, left_px, right_px))
+            collected += 1
+
+        self.enable_mp = mp_was_on
+
+        if len(frames_data) < 2 * trim + 1:
+            print(f"[MouthCorners Baseline] 有效帧不足: {len(frames_data)}, 需要 >= {2*trim+1}")
+            return False
+
+        # 计算均值
+        noses = np.array([f[0] for f in frames_data], dtype=np.float64)
+        lefts = np.array([f[1] for f in frames_data], dtype=np.float64)
+        rights = np.array([f[2] for f in frames_data], dtype=np.float64)
+        mean_n = noses.mean(axis=0)
+        mean_l = lefts.mean(axis=0)
+        mean_r = rights.mean(axis=0)
+
+        # 按偏离排序
+        devs = []
+        for i, (n, l, r) in enumerate(frames_data):
+            d = np.linalg.norm(np.array(n) - mean_n) \
+              + np.linalg.norm(np.array(l) - mean_l) \
+              + np.linalg.norm(np.array(r) - mean_r)
+            devs.append((d, i))
+        devs.sort(key=lambda x: x[0])
+
+        # 修剪取中位数
+        trimmed_indices = [idx for _, idx in devs[trim:-trim]]
+        median_idx = trimmed_indices[len(trimmed_indices) // 2]
+        nose_px, left_px, right_px = frames_data[median_idx]
+
+        self.mouth_corners_baseline = {
+            "nose": nose_px,
+            "corner_left": left_px,
+            "corner_right": right_px,
+        }
+        save_mouth_corners_baseline(
+            nose_pos=nose_px,
+            left_corner_pos=left_px,
+            right_corner_pos=right_px,
+        )
+
+        # 打印统计
+        all_d = [d for d, _ in devs]
+        med_d = all_d[len(all_d) // 2]
+        print(f"  [MouthCorners Baseline] {len(frames_data)}帧→trim{trim}→ "
+              f"中位={nose_px}/{left_px}/{right_px} "
+              f"(偏差: min={all_d[0]:.1f} med={med_d:.1f} max={all_d[-1]:.1f})")
+        return True
+
+    # ==================================================================
+    # 嘴部 MAR 计算与信号
+    # ==================================================================
+
+    @staticmethod
+    def _calc_mar(lms_smooth):
+        """
+        计算 Mouth Aspect Ratio (嘴部高宽比)。
+        MAR = mouth_vertical / inter_eye_width
+
+        用眼间距做分母，不受嘴角不对称影响。
+        """
+        from eye_constants import (
+            MOUTH_TOP, MOUTH_BOTTOM,
+            MOUTH_NORM_LEFT, MOUTH_NORM_RIGHT,
+        )
+
+        # 垂直: 上唇上缘 → 下唇下缘 (纯垂直分量)
+        top = lms_smooth[MOUTH_TOP]
+        bottom = lms_smooth[MOUTH_BOTTOM]
+        vert = abs(bottom[1] - top[1])
+
+        # 水平归一化: 左眼外角 → 右眼外角（稳定，不受嘴变形影响）
+        left_eye = lms_smooth[MOUTH_NORM_LEFT]
+        right_eye = lms_smooth[MOUTH_NORM_RIGHT]
+        eye_width = abs(right_eye[0] - left_eye[0])
+
+        if eye_width < 1e-6:
+            return 0.0
+
+        return float(vert / eye_width)
+
+    def get_mouth_signal(self, lms_smooth=None):
+        """
+        返回 MAR 信号 — 对比基线 MAR。
+
+        Returns:
+            dict 或 None: {mar, delta, qualified}
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.mouth_baseline is None:
+            return None
+
+        mar = self._calc_mar(lms_smooth)
+        bl = self.mouth_baseline
+        from eye_constants import MOUTH_MAR_TOLERANCE
+        tol = MOUTH_MAR_TOLERANCE
+        delta = mar - bl["mar"]
+
+        return {
+            "mar": mar,
+            "delta": delta,
+            "qualified": abs(delta) <= tol,
+        }
+
+    def save_current_mouth_baseline(self, lms_smooth=None):
+        """手动保存当前帧的 MAR 值为嘴部基线"""
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                print("[Mouth Baseline] Cannot save: no landmark data")
+                return False
+            lms_smooth = self._last_lms_smooth
+
+        mar = self._calc_mar(lms_smooth)
+        self.mouth_baseline = {"mar": mar}
+        save_mouth_baseline(mar=mar)
+        return True
+
+    # ==================================================================
+    # 下唇 LLR 计算与信号
+    # ==================================================================
+
+    @staticmethod
+    def _calc_llr(lms_smooth):
+        """
+        计算 Lower Lip Ratio (下唇垂直比例)。
+        LLR = lower_lip_vertical / inter_eye_width
+
+        用眼间距做分母，不受嘴角不对称影响。
+        """
+        from eye_constants import (
+            LL_LIP_UPPER, LL_LIP_LOWER,
+            LL_NORM_LEFT, LL_NORM_RIGHT,
+        )
+
+        # 垂直: 下唇上缘 → 下唇下缘 (纯垂直分量)
+        upper = lms_smooth[LL_LIP_UPPER]
+        lower = lms_smooth[LL_LIP_LOWER]
+        vert = abs(lower[1] - upper[1])
+
+        # 水平归一化: 左眼外角 → 右眼外角
+        left_eye = lms_smooth[LL_NORM_LEFT]
+        right_eye = lms_smooth[LL_NORM_RIGHT]
+        eye_width = abs(right_eye[0] - left_eye[0])
+
+        if eye_width < 1e-6:
+            return 0.0
+
+        return float(vert / eye_width)
+
+    def get_lower_lip_signal(self, lms_smooth=None):
+        """
+        返回 LLR 信号 — 对比基线 LLR。
+
+        Returns:
+            dict 或 None: {llr, delta, qualified}
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        if self.lower_lip_baseline is None:
+            return None
+
+        llr = self._calc_llr(lms_smooth)
+        bl = self.lower_lip_baseline
+        from eye_constants import LOWER_LIP_LLR_TOLERANCE
+        tol = LOWER_LIP_LLR_TOLERANCE
+        delta = llr - bl["llr"]
+
+        return {
+            "llr": llr,
+            "delta": delta,
+            "qualified": abs(delta) <= tol,
+        }
+
+    def save_current_lower_lip_baseline(self, lms_smooth=None):
+        """手动保存当前帧的 LLR 值为下唇基线"""
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                print("[LowerLip Baseline] Cannot save: no landmark data")
+                return False
+            lms_smooth = self._last_lms_smooth
+
+        llr = self._calc_llr(lms_smooth)
+        self.lower_lip_baseline = {"llr": llr}
+        save_lower_lip_baseline(llr=llr)
+        return True
+
     def close(self):
         self.stop_display()
         if hasattr(self, 'landmarker') and self.landmarker:
@@ -1007,7 +1615,7 @@ if __name__ == "__main__":
 
     detector = EllSegDetector()
     detector.start_display()
-    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [1] Toggle MP  [2] Toggle EllSeg  [Q] Quit")
+    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [M] Save mouth  [L] Save lower lip  [U] Save upper lip  [C] Save mouth corners  [A] Save ALL  [1] Toggle MP  [2] Toggle EllSeg  [3] Toggle Landmarks  [Q] Quit")
 
     if raw_test:
         print("\n[Raw FPS Test] 仅测量摄像头原始读取帧率 (跳过 MediaPipe + EllSeg)...")
@@ -1040,6 +1648,34 @@ if __name__ == "__main__":
             # 检测 B 键保存眉毛基线
             if last in (ord('b'), ord('B')):
                 detector.save_current_eyebrow_baseline()
+                detector._last_key = None
+            # 检测 M 键保存嘴部基线
+            if last in (ord('m'), ord('M')):
+                detector.save_current_mouth_baseline()
+                detector._last_key = None
+            # 检测 L 键保存下唇基线
+            if last in (ord('l'), ord('L')):
+                detector.save_current_lower_lip_baseline()
+                detector._last_key = None
+            # 检测 U 键保存上唇基线
+            if last in (ord('u'), ord('U')):
+                detector.save_current_upper_lip_baseline()
+                detector._last_key = None
+            # 检测 C 键保存嘴角基线
+            if last in (ord('c'), ord('C')):
+                detector.save_current_mouth_corners_baseline()
+                detector._last_key = None
+            # 检测 A 键一键保存全部基线
+            if last in (ord('a'), ord('A')):
+                print("\n=== 一键保存全部基线 ===")
+                detector.save_current_baseline()
+                detector.save_current_eyelid_baseline()
+                detector.save_current_eyebrow_baseline()
+                detector.save_current_mouth_baseline()
+                detector.save_current_lower_lip_baseline()
+                detector.save_current_upper_lip_baseline()
+                detector.save_current_mouth_corners_baseline()
+                print("=== 全部基线保存完成 ===\n")
                 detector._last_key = None
 
     except KeyboardInterrupt:
