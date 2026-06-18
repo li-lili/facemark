@@ -1,4 +1,4 @@
-﻿"""
+"""
 Eye Auto Tuner — 眼睛舵机调整工具 (主入口)
 ==========================================
 核心功能: 初始化硬件 + 发送舵机角度 + 采集检测 + 保存结果
@@ -27,7 +27,9 @@ from utility import read_yaml
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
     EYEBALL_CHANNELS, EYELID_CHANNELS,     EYEBROW_CHANNELS, EYEBROW_NAMES,
-    EYEBROW_EBHR_TOLERANCE, EYEBROW_WAIT_SECONDS, EYEBROW_MAX_ITERATIONS,
+    EYEBROW_CUSTOM_BIG_TOLERANCE,
+    EYEBROW_BIG_SYMMETRY_TOLERANCE,
+    EYEBROW_WAIT_SECONDS, EYEBROW_MAX_ITERATIONS,
     DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX,
     CAMERA_INDEX, FLIP_HORIZONTAL,
     EYELID_EAR_TOLERANCE, EYELID_WAIT_SECONDS, EYELID_MAX_ITERATIONS,
@@ -64,6 +66,7 @@ class EyeAutoTuner:
         servo_num: int = 27,
         stabilize_frames: int = 8,
         settle_time_ms: int = 300,
+        detector: EllSegDetector = None,
     ):
         self.yaml_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), yaml_file)
         self.port = port
@@ -71,6 +74,9 @@ class EyeAutoTuner:
         self.servo_num = servo_num
         self.stabilize_frames = stabilize_frames
         self.settle_time_ms = settle_time_ms
+
+        # 外部传入的 detector（qt_calibration_panel 共享相机）
+        self.external_detector = detector
 
         # 组件引用（延迟初始化）
         self.controller = None
@@ -126,15 +132,19 @@ class EyeAutoTuner:
             self.eyebrow_ranges[ch] = (lo, hi)
             print(f"    A{ch} ({EYEBROW_NAMES[idx]}): range=[{lo}, {hi}]")
 
-        # 2. 初始化 EllSeg 虹膜检测器 (必须与标定基线时分辨率一致: 1920x1080)
-        print("\n[2/2] 初始化 EllSeg 虹膜检测系统...")
-        self.scorer = EllSegDetector(
-            camera_index=CAMERA_INDEX,
-            width=1920,
-            height=1080,
-            flip_horizontal=FLIP_HORIZONTAL,
-            stabilize_frames=self.stabilize_frames,
-        )
+        # 2. 初始化 EllSeg 虹膜检测器
+        if self.external_detector is not None:
+            self.scorer = self.external_detector
+            print("  (使用外部共享相机)")
+        else:
+            print("\n[2/2] 初始化 EllSeg 虹膜检测系统...")
+            self.scorer = EllSegDetector(
+                camera_index=CAMERA_INDEX,
+                width=1920,
+                height=1080,
+                flip_horizontal=FLIP_HORIZONTAL,
+                stabilize_frames=self.stabilize_frames,
+            )
 
         print("\n" + "=" * 60)
         print("  初始化完成！")
@@ -146,12 +156,15 @@ class EyeAutoTuner:
 
     def send_servo(self, channel: int, angle: int,
                    angle_range: Tuple[int, int] = None):
-        """发送单个舵机角度，自动 clamp 到范围"""
+        """发送单个舵机角度，自动 clamp 到范围，并同步当前内存角度。"""
         if angle_range:
             angle = max(angle_range[0], min(angle_range[1], angle))
         self.controller.set_servo_angle_time_32(
             [angle], [channel], 200, servo_num=self.controller.servo_num
         )
+        # 记录已发送角度，避免下一次 UI 手动/自动动作又从 YAML temp_deg 起步。
+        if 0 <= channel < len(self.controller.list_temp_deg):
+            self.controller.list_temp_deg[channel] = angle
 
     def send_servos(self, channels: List[int], angles: List[int],
                     angle_ranges: List[Tuple[int, int]] = None):
@@ -293,7 +306,7 @@ class EyeAutoTuner:
             (passed: bool, iterations: int, final_region_scores: dict)
         """
         if self.scorer.baseline is None:
-            print("[WARN] 未加载基线! 请先运行 ellseg_scorer.py 按 [S] 保存基线到 face_points.json")
+            print("[WARN] 未加载基线! 请先运行 ellseg_scorer.py 按 [S] 保存基线到 face_point.json")
             return False, 0, {}
 
         print(f"{'='*60}")
@@ -537,7 +550,7 @@ class EyeAutoTuner:
             wait_seconds = UPPER_LIP_WAIT_SECONDS
 
         if self.scorer.upper_lip_baseline is None:
-            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = UPPER_LIP_ULR_TOLERANCE
@@ -668,7 +681,8 @@ class EyeAutoTuner:
 
         Returns:
             dict 或 None: {"left_ear", "right_ear", "left_delta", "right_delta",
-                           "left_qualified", "right_qualified"}
+                           "eyelid_symmetry", "left_qualified",
+                           "right_qualified", "symmetry_qualified"}
         """
         self.scorer.enable_mp = True
         self.scorer.enable_ellseg = False
@@ -703,11 +717,13 @@ class EyeAutoTuner:
                 "right_ear": signal["right_ear"],
                 "left_delta": signal["left_delta"],
                 "right_delta": signal["right_delta"],
+                "eyelid_symmetry": signal["eyelid_symmetry"],
             }))
             collected += 1
 
+            # 采集进度（基本参数由 cv2.putText 常驻显示）
             self.scorer.update_hud([
-                (f"Eyelid Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+                (f"Eyelid Sampling: {collected}/{n_frames}", (10, 136), (200, 200, 200)),
             ])
 
         self.scorer.enable_mp = False
@@ -725,12 +741,15 @@ class EyeAutoTuner:
             avg[key] = sum(s[1][key] for s in trimmed) / n
 
         tol = EYELID_EAR_TOLERANCE
+        avg["eyelid_symmetry"] = abs(avg["left_ear"] - avg["right_ear"])
         avg["left_qualified"] = abs(avg["left_delta"]) <= tol
         avg["right_qualified"] = abs(avg["right_delta"]) <= tol
+        avg["symmetry_qualified"] = avg["eyelid_symmetry"] <= tol
 
         all_devs = [s[0] for s in samples]
         print(f"  [Eyelid Collect] {len(samples)} frames, trim {trim}: "
               f"L_delta={avg['left_delta']:+.4f} R_delta={avg['right_delta']:+.4f} "
+              f"Sym={avg['eyelid_symmetry']:.4f} "
               f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
 
         return avg
@@ -747,14 +766,18 @@ class EyeAutoTuner:
         keep_display: bool = False,
     ) -> tuple:
         """
-        引导式自动调整 — 只调整 A8/A9 眼皮舵机。
+        引导式自动调整 — 两阶段眼皮 A8/A9 舵机。
+
+        Phase 1 (各自达标): 左右眼皮各自回到自己的 EAR 基线通过区间
+        Phase 2 (对称): 高宽比更高的一侧向更低的一侧靠
 
         流程（每轮迭代）:
           1. 打开 MP（仅 MediaPipe 关键点）
           2. 采集 60 帧 → 去头尾求平均 EAR
           3. 关闭 MP
-          4. 若左右眼 EAR 偏差均 ≤ 容差 → 通过
-          5. 否则按偏差方向移动 A8/A9 → 等待 → 下一轮
+          4. P1: 若单侧 EAR 偏离基线容差 → 该侧单独开/合
+          5. P1 通过后进入 P2: 若 |L_EAR - R_EAR| > 对称容差 → 合上 EAR 更高侧
+          6. 全部达标 → 通过
 
         Args:
             ear_step:       每次调整的舵机角度步长 (默认 1°)
@@ -770,16 +793,18 @@ class EyeAutoTuner:
             wait_seconds = EYELID_WAIT_SECONDS
 
         if self.scorer.eyelid_baseline is None:
-            print("[WARN] 未加载眼皮基线! 请先在 ellseg_scorer.py 中按 [E] 保存眼皮基线到 eyelid_baseline.json")
+            print("[WARN] 未加载眼皮基线! 请先在 ellseg_scorer.py 中按 [E] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = EYELID_EAR_TOLERANCE
+        sym_tol = EYELID_EAR_TOLERANCE  # 对称容差与 EAR 容差相同
 
         print(f"{'='*60}")
-        print(f"  引导式自动调整 (仅眼皮 A8-A9)")
+        print(f"  引导式自动调整 (仅眼皮 A8-A9) — 两阶段")
+        print(f"  Phase 1: 各自达标 (|L_delta|、|R_delta| ≤ {tol})")
+        print(f"  Phase 2: 左右对称 (|L_EAR - R_EAR| ≤ {sym_tol})")
         print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 EAR")
         print(f"  步长: {ear_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
-        print(f"  目标: 左右眼 EAR 偏差 ≤ {tol}")
         bl = self.scorer.eyelid_baseline
         print(f"  基线: L_EAR={bl['left_ear']:.4f} R_EAR={bl['right_ear']:.4f}")
         print(f"{'='*60}\n")
@@ -792,7 +817,11 @@ class EyeAutoTuner:
         }
         print(f"  初始角度: {dict(zip(EYELID_NAMES, [current_angles[c] for c in EYELID_CHANNELS]))}")
 
+        a8_sign = getattr(self, '_eyelid_a8_flip', -1)
+        a9_sign = getattr(self, '_eyelid_a9_flip', 1)
+
         iteration = 0
+        phase = 1  # start in Phase 1 (各自达标)
         sleep_chunk = 0.1
 
         try:
@@ -804,7 +833,7 @@ class EyeAutoTuner:
                     break
 
                 self.scorer.update_hud([
-                    (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"[Eyelid P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                 ])
 
                 # ---- 采集 EAR ----
@@ -812,10 +841,10 @@ class EyeAutoTuner:
 
                 if avg_signal is None:
                     self.scorer.update_hud([
-                        (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"[Eyelid P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                         (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
                     ])
-                    print(f"  [Eyelid Iter {iteration:3d}] 无法获取有效帧")
+                    print(f"  [Eyelid P{phase} Iter {iteration:3d}] 无法获取有效帧")
                     _waited = 0
                     while _waited < wait_seconds:
                         time.sleep(min(sleep_chunk, wait_seconds - _waited))
@@ -829,24 +858,35 @@ class EyeAutoTuner:
                 l_ear = avg_signal["left_ear"]
                 r_ear = avg_signal["right_ear"]
 
-                # ---- 检查是否已合格 ----
+                # 对称性: 左右当前 EAR 高宽比差异。
+                ear_sym = avg_signal["eyelid_symmetry"]
+                sym_ok = avg_signal["symmetry_qualified"]
+
+                print(f"  [Eyelid P{phase} Iter {iteration:3d}] "
+                      f"L_EAR={l_ear:.4f} (Δ={l_delta:+.4f}) "
+                      f"R_EAR={r_ear:.4f} (Δ={r_delta:+.4f}) "
+                      f"Sym={ear_sym:.4f}")
+
+                # ---- update_hud: 只显示调整专有信息，基本参数由 cv2.putText 常驻 ----
+                phase_label = "P1:各自" if phase == 1 else "P2:对称"
+
+                self.scorer.update_hud([
+                    (f"[Eyelid {phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"A8={current_angles[EYELID_CHANNELS[0]]}° A9={current_angles[EYELID_CHANNELS[1]]}°", (10, 118), (200, 200, 200)),
+                ])
+
+                # ---- 检查两阶段全部合格 ----
                 l_ok = abs(l_delta) <= tol
                 r_ok = abs(r_delta) <= tol
-
-                print(f"  [Eyelid Iter {iteration:3d}] "
-                      f"L_EAR={l_ear:.4f} (Δ={l_delta:+.4f}) "
-                      f"R_EAR={r_ear:.4f} (Δ={r_delta:+.4f})")
-
-                if l_ok and r_ok:
+                if phase == 2 and sym_ok and l_ok and r_ok:
                     print(f"\n{'='*60}")
-                    print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次")
+                    print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次 (Phase 2)")
                     print(f"      L_EAR={l_ear:.4f}  R_EAR={r_ear:.4f}")
                     final_ang = " ".join([f"{n}={current_angles[c]}度"
                                          for n, c in zip(EYELID_NAMES, EYELID_CHANNELS)])
                     print(f"      角度: {final_ang}")
                     print(f"{'='*60}\n")
 
-                    # 合并眼球当前角度到完整配置
                     all_angles = []
                     for ch in EYE_SERVO_CHANNELS:
                         if ch in current_angles:
@@ -860,47 +900,134 @@ class EyeAutoTuner:
                     time.sleep(1)
                     return True, iteration, avg_signal
 
-                # ---- 移动 A8/A9: 先调偏差大的眼 ----
-                # adj_map: delta > 0 = 太开 → 关 (-1); delta < 0 = 太闭 → 开 (+1)
-                a8_sign = getattr(self, '_eyelid_a8_flip', -1)
-                a9_sign = getattr(self, '_eyelid_a9_flip', 1)
+                # ================================================================
+                # Phase 1: 左右各自达标 — 单侧 EAR 偏离基线就单独开/合
+                # ================================================================
+                if phase == 1:
+                    if l_ok and r_ok:
+                        # 两侧都已在各自基线容差内 → 进入 Phase 2
+                        phase = 2
+                        print(f"  [P1 → P2] L/R_EAR 均通过，进入对称调整 "
+                              f"(当前 sym={ear_sym:.4f}, 容差={sym_tol:.4f})")
+                        continue
 
-                l_need = abs(l_delta) > tol
-                r_need = abs(r_delta) > tol
+                    moves = []
+                    if not l_ok:
+                        moves.append(("L", EYELID_CHANNELS[0], EYELID_NAMES[0], a8_sign, l_delta))
+                    if not r_ok:
+                        moves.append(("R", EYELID_CHANNELS[1], EYELID_NAMES[1], a9_sign, r_delta))
 
-                if not l_need and not r_need:
-                    print(f"  [Eyelid Iter {iteration:3d}] 无需移动 (偏差在容差内)")
+                    moved_sides = []
+                    limit_notes = []
+                    action_parts = []
+                    for side, ch, name, sign, deviation in moves:
+                        # deviation > 0: 这侧比基线更开 → 合
+                        # deviation < 0: 这侧比基线更闭 → 开
+                        direction = -1 if deviation > 0 else 1
+                        delta_angle = sign * direction
+                        old_angle = current_angles[ch]
+                        lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
+                        new_angle = round(old_angle + delta_angle * ear_step)
+                        new_angle = max(lo, min(hi, new_angle))
+
+                        if new_angle == old_angle:
+                            limit_note = f"{name}到极限({old_angle}度)"
+                            limit_notes.append(limit_note)
+                            print(f"  [Eyelid P{phase} Iter {iteration:3d}] {limit_note}")
+                            continue
+
+                        self.send_servo(ch, new_angle, (lo, hi))
+                        current_angles[ch] = new_angle
+                        moved_sides.append(side)
+                        action = "合" if direction < 0 else "开"
+                        action_parts.append(f"{side}{action} Δ={deviation:+.4f}")
+                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}度 "
+                              f"(delta={deviation:+.4f}, {'close' if direction < 0 else 'open'} to own range)")
+
+                    if not moved_sides:
+                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] P1未移动: 未通过侧已到极限")
+                    # P1 动作 HUD
+                    action_text = (
+                        "P1→" + " ".join(action_parts)
+                        if action_parts else "P1未通过侧到极限"
+                    )
+                    display_phase_label = "P1:各自" if phase == 1 else "P2:对称"
+                    self.scorer.update_hud([
+                        (f"[Eyelid {display_phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (action_text, (10, 118), (0, 255, 200)),
+                        ("; ".join(limit_notes), (10, 136), (0, 180, 255)),
+                    ])
+
+                # ================================================================
+                # Phase 2: 左右对称 — EAR 高的一侧向低的一侧靠
+                # ================================================================
                 else:
-                    # 选偏差大的那只眼单独调整
-                    if not r_need or (l_need and abs(l_delta) >= abs(r_delta)):
-                        side = "L"
-                        ch = EYELID_CHANNELS[0]
-                        name = EYELID_NAMES[0]
-                        sign = a8_sign
-                        d = l_delta
-                    else:
-                        side = "R"
-                        ch = EYELID_CHANNELS[1]
-                        name = EYELID_NAMES[1]
-                        sign = a9_sign
-                        d = r_delta
+                    if not (l_ok and r_ok):
+                        phase = 1
+                        print(f"  [Eyelid P2 Iter {iteration:3d}] 单侧 EAR 离开通过区间 "
+                              f"(L_ok={l_ok} R_ok={r_ok})，回到P1各自达标")
+                        self.scorer.update_hud([
+                            (f"[Eyelid P1:各自 Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                            ("P2单侧离区间→回P1", (10, 118), (0, 180, 255)),
+                        ])
+                        continue
 
-                    delta = sign * (-1 if d > tol else (1 if d < -tol else 0))
-                    new_angle = round(current_angles[ch] + delta * ear_step)
+                    if sym_ok:
+                        print(f"\n{'='*60}")
+                        print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次 (Phase 2)")
+                        print(f"      L_EAR={l_ear:.4f}  R_EAR={r_ear:.4f}  Sym={ear_sym:.4f}")
+                        final_ang = " ".join([f"{n}={current_angles[c]}度"
+                                             for n, c in zip(EYELID_NAMES, EYELID_CHANNELS)])
+                        print(f"      角度: {final_ang}")
+                        print(f"{'='*60}\n")
+
+                        all_angles = []
+                        for ch in EYE_SERVO_CHANNELS:
+                            if ch in current_angles:
+                                all_angles.append(current_angles[ch])
+                            else:
+                                all_angles.append(self.controller.list_temp_deg[ch])
+                        self.save_result(all_angles)
+                        self.export_angle_config(all_angles)
+
+                        self.scorer.update_hud([("★★ EYELID PASSED ★★", (100, 80), (0, 255, 0))])
+                        time.sleep(1)
+                        return True, iteration, avg_signal
+
+                    # 高宽比高的一侧闭合，向低的一侧靠。
+                    if l_ear >= r_ear:
+                        side, ch, name, base_sign = "L", EYELID_CHANNELS[0], EYELID_NAMES[0], a8_sign
+                    else:
+                        side, ch, name, base_sign = "R", EYELID_CHANNELS[1], EYELID_NAMES[1], a9_sign
+
+                    old_angle = current_angles[ch]
                     lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
+                    new_angle = round(old_angle + base_sign * -1 * ear_step)
                     new_angle = max(lo, min(hi, new_angle))
-                    self.send_servo(ch, new_angle, (lo, hi))
-                    current_angles[ch] = new_angle
-                    print(f"  [Eyelid Iter {iteration:3d}] 移动 {side}: {name}={new_angle}度 "
-                          f"(EAR Δ={d:+.4f}, Δangle={delta:+.0f})")
+                    limit_note = ""
+                    if new_angle == old_angle:
+                        limit_note = f"{name}闭合到极限({old_angle}deg)"
+                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {limit_note}")
+                    else:
+                        self.send_servo(ch, new_angle, (lo, hi))
+                        current_angles[ch] = new_angle
+                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}deg "
+                              f"(higher EAR closes toward lower, sym={ear_sym:.4f})")
+
+                    self.scorer.update_hud([
+                        (f"[Eyelid {phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"P2→合{side} 靠低EAR sym={ear_sym:.4f}", (10, 118), (255, 180, 0)),
+                        (limit_note, (10, 136), (0, 180, 255)),
+                    ])
 
                 # ---- 等待 ----
                 _waited = 0
                 while _waited < wait_seconds:
                     time.sleep(min(sleep_chunk, wait_seconds - _waited))
                     _waited += sleep_chunk
+                    p_label = "P1:各自" if phase == 1 else "P2:对称"
                     self.scorer.update_hud([
-                        (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"[Eyelid {p_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                         (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
                     ])
                     if self.scorer.user_pressed_stop:
@@ -908,7 +1035,7 @@ class EyeAutoTuner:
 
             # 达到最大迭代未通过
             print(f"\n{'='*60}")
-            print(f"  ✘ 眼皮未在 {max_iterations} 次迭代内通过")
+            print(f"  ✘ 眼皮未在 {max_iterations} 次迭代内通过 (停在 Phase {phase})")
             print(f"{'='*60}\n")
             return False, iteration, {}
 
@@ -1023,7 +1150,7 @@ class EyeAutoTuner:
             wait_seconds = UPPER_LIP_WAIT_SECONDS
 
         if self.scorer.upper_lip_baseline is None:
-            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = UPPER_LIP_ULR_TOLERANCE
@@ -1138,28 +1265,18 @@ class EyeAutoTuner:
                 self.scorer.stop_display()
 
     # ==================================================================
-    # 多帧采集 + 修剪平均 — 眉毛 EBHR
+    # 多帧采集 + 修剪平均 — 眉毛垂直位置
     # ==================================================================
 
     def collect_eyebrow_samples(self, n_frames: int = 60, trim: int = 10):
         """
-        打开 MP（无需 EllSeg）→ 采集 n 帧 EBHR → 关闭 → 修剪平均。
-
-        流程:
-          1. 开启 MP
-          2. 连续采集 n_frames 帧 EBHR 信号
-          3. 关闭 MP
-          4. 按 abs(L_delta) + abs(R_delta) 排序，修剪上下
-          5. 返回平均 EBHR 信号
-
-        Returns:
-            dict 或 None: {"left_ebhr", "right_ebhr", "left_delta", "right_delta",
-                           "left_qualified", "right_qualified"}
+        Collect eyebrow BIG and slope samples, trim outliers, and average.
+        Eyebrow pass/fail uses only BIG range, BIG symmetry, and slope range.
         """
         self.scorer.enable_mp = True
         self.scorer.enable_ellseg = False
 
-        samples = []  # list of (total_deviation, signal_dict)
+        samples = []
         collected = 0
         no_face_count = 0
 
@@ -1183,12 +1300,28 @@ class EyeAutoTuner:
                 continue
             no_face_count = 0
 
-            total_dev = abs(signal["left_delta"]) + abs(signal["right_delta"])
+            total_dev = abs(signal["left_position_delta"]) + abs(signal["right_position_delta"])
             samples.append((total_dev, {
-                "left_ebhr": signal["left_ebhr"],
-                "right_ebhr": signal["right_ebhr"],
-                "left_delta": signal["left_delta"],
-                "right_delta": signal["right_delta"],
+                "left_slope": signal["left_slope"],
+                "right_slope": signal["right_slope"],
+                "left_brow_iris_gap": signal["left_brow_iris_gap"],
+                "right_brow_iris_gap": signal["right_brow_iris_gap"],
+                "left_position": signal["left_position"],
+                "right_position": signal["right_position"],
+                "left_position_target": signal["left_position_target"],
+                "right_position_target": signal["right_position_target"],
+                "left_position_min": signal["left_position_min"],
+                "left_position_max": signal["left_position_max"],
+                "right_position_min": signal["right_position_min"],
+                "right_position_max": signal["right_position_max"],
+                "left_position_delta": signal["left_position_delta"],
+                "right_position_delta": signal["right_position_delta"],
+                "left_slope_min": signal["left_slope_min"],
+                "left_slope_max": signal["left_slope_max"],
+                "right_slope_min": signal["right_slope_min"],
+                "right_slope_max": signal["right_slope_max"],
+                "big_symmetry": signal["big_symmetry"],
+                "big_symmetry_tolerance": signal["big_symmetry_tolerance"],
             }))
             collected += 1
 
@@ -1204,23 +1337,45 @@ class EyeAutoTuner:
 
         samples.sort(key=lambda x: x[0])
         trimmed = samples[trim:-trim]
-
         n = len(trimmed)
         avg = {}
-        for key in ["left_ebhr", "right_ebhr", "left_delta", "right_delta"]:
+        for key in [
+            "left_slope", "right_slope",
+            "left_brow_iris_gap", "right_brow_iris_gap",
+            "left_position", "right_position",
+            "left_position_target", "right_position_target",
+            "left_position_min", "left_position_max",
+            "right_position_min", "right_position_max",
+            "left_position_delta", "right_position_delta",
+            "left_slope_min", "left_slope_max",
+            "right_slope_min", "right_slope_max",
+            "big_symmetry", "big_symmetry_tolerance",
+        ]:
             avg[key] = sum(s[1][key] for s in trimmed) / n
 
-        tol = EYEBROW_EBHR_TOLERANCE
-        avg["left_qualified"] = abs(avg["left_delta"]) <= tol
-        avg["right_qualified"] = abs(avg["right_delta"]) <= tol
+        avg["left_slope_qualified"] = (
+            avg["left_slope_min"] <= avg["left_slope"] <= avg["left_slope_max"])
+        avg["right_slope_qualified"] = (
+            avg["right_slope_min"] <= avg["right_slope"] <= avg["right_slope_max"])
+        avg["slope_range_qualified"] = (
+            avg["left_slope_qualified"] and avg["right_slope_qualified"])
+        avg["symmetry_qualified"] = avg["big_symmetry"] <= avg["big_symmetry_tolerance"]
+        avg["left_qualified"] = (
+            avg["left_position_delta"] == 0.0 and avg["left_slope_qualified"])
+        avg["right_qualified"] = (
+            avg["right_position_delta"] == 0.0 and avg["right_slope_qualified"])
+        avg["qualified"] = (
+            avg["left_qualified"] and avg["right_qualified"] and avg["symmetry_qualified"])
 
         all_devs = [s[0] for s in samples]
         print(f"  [Eyebrow Collect] {len(samples)} frames, trim {trim}: "
-              f"L_delta={avg['left_delta']:+.4f} R_delta={avg['right_delta']:+.4f} "
+              f"BIG L_delta={avg['left_position_delta']:+.4f} "
+              f"R_delta={avg['right_position_delta']:+.4f} "
+              f"Slope={'OK' if avg['slope_range_qualified'] else 'BAD'} "
+              f"Sym={'OK' if avg['symmetry_qualified'] else 'BAD'} "
               f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
 
         return avg
-
     # ==================================================================
     # 多帧采集 + 修剪平均 — 嘴部 MAR
     # ==================================================================
@@ -1310,77 +1465,83 @@ class EyeAutoTuner:
         max_iterations: int = None,
         wait_seconds: float = None,
         keep_display: bool = False,
+        log_func=None,
     ) -> tuple:
         """
-        引导式自动调整 — 只调整 A0/A1 眉毛舵机。
+        Auto-adjust A0/A1 eyebrows using a two-phase strategy.
 
-        流程（每轮迭代）:
-          1. 打开 MP（仅 MediaPipe 关键点）
-          2. 采集 60 帧 → 去头尾求平均 EBHR
-          3. 关闭 MP
-          4. 若左右眉 EBHR 偏差均 ≤ 容差 → 通过
-          5. 否则按偏差方向移动 A0/A1 → 等待 → 下一轮
+        Phase 1 — 对称调整:
+          Physical coupling causes L_BIG to drag R_BIG when only one servo moves.
+          Therefore we first make left/right BIG symmetric by moving ONLY ONE side
+          toward the symmetry midpoint each iteration.
 
-        Args:
-            ebhr_step:     每次调整的舵机角度步长 (默认 1°)
-            max_iterations: 最大循环次数 (默认 EYEBROW_MAX_ITERATIONS)
-            wait_seconds:   每次移动后等待秒数 (默认 EYEBROW_WAIT_SECONDS)
-
-        Returns:
-            (passed: bool, iterations: int, final_ebhr_data: dict)
+        Phase 2 — 同步升降:
+          Once symmetric, move A0 and A1 together by the same amount to bring
+          both BIG values into target range simultaneously.
         """
         if max_iterations is None:
             max_iterations = EYEBROW_MAX_ITERATIONS
         if wait_seconds is None:
             wait_seconds = EYEBROW_WAIT_SECONDS
 
-        if self.scorer.eyebrow_baseline is None:
-            print("[WARN] 未加载眉毛基线! 请先在 ellseg_scorer.py 中按 [B] 保存眉毛基线到 eyebrow_baseline.json")
+        bl = self.scorer.eyebrow_baseline
+        if not (
+            bl
+            and "left_brow_iris_gap" in bl
+            and "right_brow_iris_gap" in bl
+            and "left_slope" in bl
+            and "right_slope" in bl
+        ):
+            print("[WARN] No eyebrow baseline. Save one first in ellseg_scorer.py with [B].")
             return False, 0, {}
 
-        tol = EYEBROW_EBHR_TOLERANCE
+        left_range = (
+            float(bl["left_brow_iris_gap"]) - EYEBROW_CUSTOM_BIG_TOLERANCE,
+            float(bl["left_brow_iris_gap"]) + EYEBROW_CUSTOM_BIG_TOLERANCE,
+        )
+        right_range = (
+            float(bl["right_brow_iris_gap"]) - EYEBROW_CUSTOM_BIG_TOLERANCE,
+            float(bl["right_brow_iris_gap"]) + EYEBROW_CUSTOM_BIG_TOLERANCE,
+        )
 
         print(f"{'='*60}")
-        print(f"  引导式自动调整 (仅眉毛 A0-A1)")
-        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 EBHR")
-        print(f"  步长: {ebhr_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
-        print(f"  目标: 左右眉 EBHR 偏差 ≤ {tol}")
-        bl = self.scorer.eyebrow_baseline
-        print(f"  基线: L_EBHR={bl['left_ebhr']:.4f} R_EBHR={bl['right_ebhr']:.4f}")
+        print("  Auto eyebrow adjust (A0-A1) — 两阶段策略")
+        print("  Phase 1: 对称调整 (单独调一侧)")
+        print("  Phase 2: 同步升降 (两边一起)")
+        print("  Step: {:.0f} deg | max iter: {} | wait: {}s".format(ebhr_step, max_iterations, wait_seconds))
+        print("  Target: BIG in range, BIG symmetry OK, slope range OK")
+        print("  custom baseline: "
+              f"L_BIG=[{left_range[0]:+.4f},{left_range[1]:+.4f}] "
+              f"R_BIG=[{right_range[0]:+.4f},{right_range[1]:+.4f}]")
         print(f"{'='*60}\n")
 
         self.scorer.start_display()
+        current_angles = {ch: self.controller.list_temp_deg[ch] for ch in EYEBROW_CHANNELS}
+        print(f"  Initial angles: {dict(zip(EYEBROW_NAMES, [current_angles[c] for c in EYEBROW_CHANNELS]))}")
 
-        current_angles = {
-            ch: self.controller.list_temp_deg[ch]
-            for ch in EYEBROW_CHANNELS
-        }
-        print(f"  初始角度: {dict(zip(EYEBROW_NAMES, [current_angles[c] for c in EYEBROW_CHANNELS]))}")
+        if log_func is None:
+            log_func = print
+        a0_sign = getattr(self, '_eyebrow_a0_flip', -1)
+        a1_sign = getattr(self, '_eyebrow_a1_flip', -1)
 
         iteration = 0
+        phase = 1  # start in Phase 1
         sleep_chunk = 0.1
 
         try:
             while iteration < max_iterations:
                 iteration += 1
-
                 if self.scorer.user_pressed_stop:
-                    print("\n[USER] 收到停止信号")
+                    print("\n[USER] Stop requested")
                     break
 
                 self.scorer.update_hud([
-                    (f"[Eyebrow Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"[Eyebrow P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                 ])
 
-                # ---- 采集 EBHR ----
                 avg_signal = self.collect_eyebrow_samples(n_frames=60, trim=10)
-
                 if avg_signal is None:
-                    self.scorer.update_hud([
-                        (f"[Eyebrow Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                        (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
-                    ])
-                    print(f"  [Eyebrow Iter {iteration:3d}] 无法获取有效帧")
+                    print(f"  [Eyebrow Iter {iteration:3d}] no valid frames")
                     _waited = 0
                     while _waited < wait_seconds:
                         time.sleep(min(sleep_chunk, wait_seconds - _waited))
@@ -1389,91 +1550,161 @@ class EyeAutoTuner:
                             break
                     continue
 
-                l_delta = avg_signal["left_delta"]
-                r_delta = avg_signal["right_delta"]
-                l_ebhr = avg_signal["left_ebhr"]
-                r_ebhr = avg_signal["right_ebhr"]
+                l_big = avg_signal["left_brow_iris_gap"]
+                r_big = avg_signal["right_brow_iris_gap"]
+                l_delta = avg_signal["left_position_delta"]
+                r_delta = avg_signal["right_position_delta"]
+                symmetry = avg_signal["big_symmetry"]
+                slope_ok = avg_signal.get("slope_range_qualified", True)
+                sym_ok = symmetry <= EYEBROW_BIG_SYMMETRY_TOLERANCE
 
-                # ---- 检查是否已合格 ----
-                l_ok = abs(l_delta) <= tol
-                r_ok = abs(r_delta) <= tol
+                print(f"  [Eyebrow P{phase} Iter {iteration:3d}] "
+                      f"L={l_big:.4f} (d={l_delta:+.4f}) "
+                      f"R={r_big:.4f} (d={r_delta:+.4f}) "
+                      f"Sym={symmetry:.4f} "
+                      f"Slope={'OK' if slope_ok else 'BAD'}")
 
-                print(f"  [Eyebrow Iter {iteration:3d}] "
-                      f"L_EBHR={l_ebhr:.4f} (Δ={l_delta:+.4f}) "
-                      f"R_EBHR={r_ebhr:.4f} (Δ={r_delta:+.4f})")
-
-                if l_ok and r_ok:
+                # 检查是否全部合格
+                l_in_range = l_delta == 0.0
+                r_in_range = r_delta == 0.0
+                if l_in_range and r_in_range and sym_ok and slope_ok:
+                    phase_str = "Phase 1" if phase == 1 else "Phase 2"
+                    log_func(f"{phase_str} 结束: 全部达标 → 通过 "
+                             f"(L={l_big:.3f} R={r_big:.3f})")
                     print(f"\n{'='*60}")
-                    print(f"  ★★ 眉毛调整通过! 共迭代 {iteration} 次")
-                    print(f"      L_EBHR={l_ebhr:.4f}  R_EBHR={r_ebhr:.4f}")
-                    final_ang = " ".join([f"{n}={current_angles[c]}度"
+                    print(f"  EYEBROW PASSED in {iteration} iterations ({phase_str})")
+                    print(f"      L_BIG={l_big:.4f}  R_BIG={r_big:.4f}")
+                    final_ang = " ".join([f"{n}={current_angles[c]}deg"
                                          for n, c in zip(EYEBROW_NAMES, EYEBROW_CHANNELS)])
-                    print(f"      角度: {final_ang}")
+                    print(f"      Angles: {final_ang}")
                     print(f"{'='*60}\n")
 
-                    # 合并所有通道当前角度
-                    # 眼睛通道 (A8-A13) 取控制器当前值
                     all_angles = []
                     for ch in EYE_SERVO_CHANNELS:
                         all_angles.append(self.controller.list_temp_deg[ch])
                     self.save_result(all_angles)
-                    self.export_angle_config(all_angles,
-                                            eyebrow_angles={c: current_angles[c] for c in EYEBROW_CHANNELS})
-
-                    self.scorer.update_hud([("★★ EYEBROW PASSED ★★", (100, 80), (0, 255, 0))])
+                    self.export_angle_config(
+                        all_angles,
+                        eyebrow_angles={c: current_angles[c] for c in EYEBROW_CHANNELS},
+                    )
+                    self.scorer.update_hud([("EYEBROW PASSED", (100, 80), (0, 255, 0))])
                     time.sleep(1)
                     return True, iteration, avg_signal
 
-                # ---- 移动 A0/A1: 先调偏差大的眉 ----
-                a0_sign = getattr(self, '_eyebrow_a0_flip', -1)
-                a1_sign = getattr(self, '_eyebrow_a1_flip', -1)
+                # ---- Phase 1: 对称调整 ----
+                if phase == 1:
+                    if sym_ok:
+                        # 对称已达标 → 进入 Phase 2
+                        phase = 2
+                        log_func("Phase 1 结束: 对称调整完成")
+                        log_func("Phase 2 开始: 同步升降")
+                        print(f"  [Phase 1 → Phase 2] Symmetry OK ({symmetry:.4f} <= {EYEBROW_BIG_SYMMETRY_TOLERANCE:.3f})")
+                        continue
 
-                l_need = abs(l_delta) > tol
-                r_need = abs(r_delta) > tol
+                    # 找出偏差更大的那侧，往对称中点方向调
+                    midpoint = (l_big + r_big) / 2.0
+                    l_dev = l_big - midpoint
+                    r_dev = r_big - midpoint
 
-                if not l_need and not r_need:
-                    print(f"  [Eyebrow Iter {iteration:3d}] 无需移动 (偏差在容差内)")
-                else:
-                    # 选偏差大的那只眉单独调整
-                    if not r_need or (l_need and abs(l_delta) >= abs(r_delta)):
+                    # 非空格的偏差更大 → 调它
+                    if abs(l_dev) >= abs(r_dev):
                         side = "L"
                         ch = EYEBROW_CHANNELS[0]
                         name = EYEBROW_NAMES[0]
                         sign = a0_sign
-                        d = l_delta
+                        deviation = l_dev
                     else:
                         side = "R"
                         ch = EYEBROW_CHANNELS[1]
                         name = EYEBROW_NAMES[1]
-                        sign = a1_sign
-                        d = r_delta
+                        # A1 is mechanically opposite to A0:
+                        # A0 raise = angle +, A1 raise = angle -.
+                        sign = -a1_sign
+                        deviation = r_dev
 
-                    # delta>0 眉毛太高 → 降低(-1); delta<0 太低 → 抬高(+1)
-                    delta_sign = -1 if d > tol else (1 if d < -tol else 0)
-                    delta = sign * delta_sign
-                    new_angle = round(current_angles[ch] + delta * ebhr_step)
+                    # deviation > 0 → 这侧更低 → 要抬高
+                    # deviation < 0 → 这侧更高 → 要降低
+                    delta_angle = sign * (-1 if deviation > 0 else 1)
+                    new_angle = round(current_angles[ch] + delta_angle * ebhr_step)
                     lo, hi = self.eyebrow_ranges[ch]
                     new_angle = max(lo, min(hi, new_angle))
                     self.send_servo(ch, new_angle, (lo, hi))
                     current_angles[ch] = new_angle
-                    print(f"  [Eyebrow Iter {iteration:3d}] 移动 {side}: {name}={new_angle}度 "
-                          f"(EBHR Δ={d:+.4f}, Δangle={delta:+.0f})")
+                    print(f"  [Eyebrow P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}deg "
+                          f"(sym dev={deviation:+.4f}, toward midpoint)")
 
-                # ---- 等待 ----
+                # ---- Phase 2: 同步升降 ----
+                else:
+                    # 计算平均位置和平均目标，两边一起移
+                    avg_current = (l_big + r_big) / 2.0
+                    avg_target = (float(bl["left_brow_iris_gap"]) + float(bl["right_brow_iris_gap"])) / 2.0
+                    avg_delta = avg_current - avg_target
+
+                    if abs(avg_delta) <= EYEBROW_CUSTOM_BIG_TOLERANCE:
+                        # 平均位置已达目标，slope/sym 问题忽略，记为通过
+                        log_func(f"Phase 2 结束: 平均BIG达标 → 通过 "
+                                 f"(L={l_big:.3f} R={r_big:.3f}, slope/sym忽略)")
+                        print(f"  [Eyebrow P{phase} Iter {iteration:3d}] Avg BIG in range. "
+                              f"(L={l_big:.4f} R={r_big:.4f}) → PASS (ignore slope/sym)")
+                        print(f"\n{'='*60}")
+                        print(f"  EYEBROW PASSED in {iteration} iterations (Phase 2 BEST FIT)")
+                        print(f"      L_BIG={l_big:.4f}  R_BIG={r_big:.4f}")
+                        final_ang = " ".join([f"{n}={current_angles[c]}deg"
+                                             for n, c in zip(EYEBROW_NAMES, EYEBROW_CHANNELS)])
+                        print(f"      Angles: {final_ang}")
+                        print(f"{'='*60}\n")
+
+                        all_angles = []
+                        for ch in EYE_SERVO_CHANNELS:
+                            all_angles.append(self.controller.list_temp_deg[ch])
+                        self.save_result(all_angles)
+                        self.export_angle_config(
+                            all_angles,
+                            eyebrow_angles={c: current_angles[c] for c in EYEBROW_CHANNELS},
+                        )
+                        self.scorer.update_hud([("EYEBROW PASSED", (100, 80), (0, 255, 0))])
+                        time.sleep(1)
+                        return True, iteration, avg_signal
+
+                    if avg_delta > 0:
+                        # 偏低 → 两边同时抬高 (delta负)
+                        direction = -1
+                    elif avg_delta < 0:
+                        # 偏高 → 两边同时降低 (delta正)
+                        direction = 1
+                    else:
+                        direction = 0
+
+                    # Phase 2: A0 和 A1 机械方向相反 → 符号翻转
+                    for side, ch, name, base_sign in [
+                        ("L", EYEBROW_CHANNELS[0], EYEBROW_NAMES[0], a0_sign),
+                        ("R", EYEBROW_CHANNELS[1], EYEBROW_NAMES[1], -a1_sign),
+                    ]:
+                        delta_angle = base_sign * direction
+                        new_angle = round(current_angles[ch] + delta_angle * ebhr_step)
+                        lo, hi = self.eyebrow_ranges[ch]
+                        new_angle = max(lo, min(hi, new_angle))
+                        self.send_servo(ch, new_angle, (lo, hi))
+                        current_angles[ch] = new_angle
+
+                    if direction != 0:
+                        print(f"  [Eyebrow P{phase} Iter {iteration:3d}] Sync: L={current_angles[EYEBROW_CHANNELS[0]]}deg "
+                              f"R={current_angles[EYEBROW_CHANNELS[1]]}deg "
+                              f"(avg_delta={avg_delta:+.4f}, dir={direction:+.0f})")
+
                 _waited = 0
                 while _waited < wait_seconds:
                     time.sleep(min(sleep_chunk, wait_seconds - _waited))
                     _waited += sleep_chunk
                     self.scorer.update_hud([
-                        (f"[Eyebrow Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"[Eyebrow P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                         (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
                     ])
                     if self.scorer.user_pressed_stop:
                         break
 
-            # 达到最大迭代未通过
             print(f"\n{'='*60}")
-            print(f"  ✘ 眉毛未在 {max_iterations} 次迭代内通过")
+            print(f"  Eyebrow failed after {max_iterations} iterations")
             print(f"{'='*60}\n")
             return False, iteration, {}
 
@@ -1481,20 +1712,15 @@ class EyeAutoTuner:
             if not keep_display:
                 self.scorer.stop_display()
 
-    # 多帧采集 + 修剪平均 — 上唇 ULR
-    # ==================================================================
+    def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
+        """Collect ULR samples, trim outliers, and average."""
 
     def collect_upper_lip_samples(self, n_frames: int = 60, trim: int = 10):
-        """
-        打开 MP（无需 EllSeg）→ 采集 n 帧 ULR → 关闭 → 修剪平均。
-
-        Returns:
-            dict 或 None: {"ulr", "delta", "qualified"}
-        """
+        """Collect ULR samples, trim outliers, and average."""
         self.scorer.enable_mp = True
         self.scorer.enable_ellseg = False
 
-        samples = []  # list of (abs_delta, signal_dict)
+        samples = []
         collected = 0
         no_face_count = 0
 
@@ -1509,7 +1735,6 @@ class EyeAutoTuner:
 
             self.scorer.detect(frame)
             signal = self.scorer.get_upper_lip_signal()
-
             if signal is None:
                 no_face_count += 1
                 if no_face_count > 10:
@@ -1523,20 +1748,17 @@ class EyeAutoTuner:
                 "delta": signal["delta"],
             }))
             collected += 1
-
             self.scorer.update_hud([
                 (f"UpperLip Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
             ])
 
         self.scorer.enable_mp = False
-
         if len(samples) < 2 * trim + 1:
-            print(f"  [UpperLip Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            print(f"  [UpperLip Collect] not enough valid samples: {len(samples)}, need >= {2*trim+1}")
             return None
 
         samples.sort(key=lambda x: x[0])
         trimmed = samples[trim:-trim]
-
         n = len(trimmed)
         avg = {
             "ulr": sum(s[1]["ulr"] for s in trimmed) / n,
@@ -1547,13 +1769,11 @@ class EyeAutoTuner:
 
         all_devs = [s[0] for s in samples]
         print(f"  [UpperLip Collect] {len(samples)} frames, trim {trim}: "
-              f"ULR={avg['ulr']:.4f} Δ={avg['delta']:+.4f} "
+              f"ULR={avg['ulr']:.4f} d={avg['delta']:+.4f} "
               f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
-
         return avg
-
     # ==================================================================
-    # 引导式自动调整 — 上唇 (A16)
+    # Auto adjust upper lip (A16)
     # ==================================================================
 
     def auto_adjust_upper_lip(
@@ -1586,7 +1806,7 @@ class EyeAutoTuner:
             wait_seconds = UPPER_LIP_WAIT_SECONDS
 
         if self.scorer.upper_lip_baseline is None:
-            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = UPPER_LIP_ULR_TOLERANCE
@@ -1734,7 +1954,7 @@ class EyeAutoTuner:
             wait_seconds = MOUTH_WAIT_SECONDS
 
         if self.scorer.mouth_baseline is None:
-            print("[WARN] 未加载嘴部基线! 请在 ellseg_scorer.py 中按 [M] 保存嘴部基线到 mouth_baseline.json")
+            print("[WARN] 未加载嘴部基线! 请在 ellseg_scorer.py 中按 [M] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = MOUTH_MAR_TOLERANCE
@@ -1948,7 +2168,7 @@ class EyeAutoTuner:
             wait_seconds = UPPER_LIP_WAIT_SECONDS
 
         if self.scorer.upper_lip_baseline is None:
-            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = UPPER_LIP_ULR_TOLERANCE
@@ -2168,7 +2388,7 @@ class EyeAutoTuner:
             wait_seconds = LOWER_LIP_WAIT_SECONDS
 
         if self.scorer.lower_lip_baseline is None:
-            print("[WARN] 未加载下唇基线! 请在 ellseg_scorer.py 中按 [L] 保存下唇基线到 lower_lip_baseline.json")
+            print("[WARN] 未加载下唇基线! 请在 ellseg_scorer.py 中按 [L] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = LOWER_LIP_LLR_TOLERANCE
@@ -2390,7 +2610,7 @@ class EyeAutoTuner:
             wait_seconds = MOUTH_CORNER_WAIT_SECONDS
 
         if self.scorer.mouth_corners_baseline is None:
-            print("[WARN] 未加载嘴角基线! 请在 ellseg_scorer.py 中按 [C] 保存嘴角基线到 mouth_corners_baseline.json")
+            print("[WARN] 未加载嘴角基线! 请在 ellseg_scorer.py 中按 [C] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol_h = MOUTH_CORNER_TOLERANCE       # 1.0 px — 水平
@@ -2654,7 +2874,7 @@ class EyeAutoTuner:
             wait_seconds = UPPER_LIP_WAIT_SECONDS
 
         if self.scorer.upper_lip_baseline is None:
-            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存上唇基线到 upper_lip_baseline.json")
+            print("[WARN] 未加载上唇基线! 请在 ellseg_scorer.py 中按 [U] 保存到 face_point.json 当前性别")
             return False, 0, {}
 
         tol = UPPER_LIP_ULR_TOLERANCE
@@ -3042,12 +3262,29 @@ def main():
     try:
         tuner.initialize()
 
+        # ---- 选择调整顺序 ----
         if mode == "eyeball":
-            has_upper_lip_bl = tuner.scorer.upper_lip_baseline is not None
-            has_mouth_bl = tuner.scorer.mouth_baseline is not None
-            has_corners_bl = tuner.scorer.mouth_corners_baseline is not None
-            has_lower_lip_bl = tuner.scorer.lower_lip_baseline is not None
-            has_eyebrow_bl = tuner.scorer.eyebrow_baseline is not None
+            print("""
++==============================================================+
+||  请选择调整顺序:
+||  [1] 眼球 → 眼眉 → 眼皮  (仅调整 A10-A13 + A0-A1 + A8-A9)
+||  [2] 默认完整顺序  (眼球→上唇→下巴→嘴角→下唇→眉毛→眼皮)
++==============================================================+
+""")
+            sel = input("请输入选择 (1/2): ").strip()
+            if sel in ('q', 'Q'):
+                tuner.cleanup()
+                return
+            order_eye_only = (sel == '1')
+        else:
+            order_eye_only = False
+
+        if mode == "eyeball":
+            has_upper_lip_bl = tuner.scorer.upper_lip_baseline is not None and not order_eye_only
+            has_mouth_bl = tuner.scorer.mouth_baseline is not None and not order_eye_only
+            has_corners_bl = tuner.scorer.mouth_corners_baseline is not None and not order_eye_only
+            has_lower_lip_bl = tuner.scorer.lower_lip_baseline is not None and not order_eye_only
+            has_eyebrow_bl = True
             has_eyelid_bl = tuner.scorer.eyelid_baseline is not None
             has_after = has_upper_lip_bl or has_mouth_bl or has_corners_bl \
                         or has_lower_lip_bl or has_eyebrow_bl or has_eyelid_bl
@@ -3064,7 +3301,10 @@ def main():
                 passed_ul = False
                 iter_ul = 0
                 if not has_upper_lip_bl:
-                    print("[WARN] 未加载上唇基线，跳过上唇调整。")
+                    if order_eye_only:
+                        print("[SKIP] 眼球模式，跳过上唇调整。")
+                    else:
+                        print("[WARN] 未加载上唇基线，跳过上唇调整。")
                 else:
                     print("\n>>> 自动进入上唇调整 (A16) ...\n")
                     tuner._upper_lip_flip = 1 if args.ul_flip else 1
@@ -3083,7 +3323,10 @@ def main():
                 passed_chin = False
                 iter_chin = 0
                 if not has_mouth_bl:
-                    print("[WARN] 未加载嘴部基线，跳过下巴调整。")
+                    if order_eye_only:
+                        print("[SKIP] 眼球模式，跳过下巴调整。")
+                    else:
+                        print("[WARN] 未加载嘴部基线，跳过下巴调整。")
                 else:
                     print("\n>>> 自动进入下巴调整 (A26) ...\n")
                     tuner._mouth_chin_flip = -1 if args.mouth_chin_flip else 1
@@ -3102,7 +3345,10 @@ def main():
                 passed_corner = False
                 iter_corner = 0
                 if not has_corners_bl:
-                    print("[WARN] 未加载嘴角基线，跳过嘴角调整。")
+                    if order_eye_only:
+                        print("[SKIP] 眼球模式，跳过嘴角调整。")
+                    else:
+                        print("[WARN] 未加载嘴角基线，跳过嘴角调整。")
                 else:
                     print("\n>>> 自动进入嘴角调整 (A22-A25) ...\n")
                     tuner._corner_horiz_flip = args.corner_horiz_flip
@@ -3122,7 +3368,10 @@ def main():
                 passed_ll = False
                 iter_ll = 0
                 if not has_lower_lip_bl:
-                    print("[WARN] 未加载下唇基线，跳过下唇调整。")
+                    if order_eye_only:
+                        print("[SKIP] 眼球模式，跳过下唇调整。")
+                    else:
+                        print("[WARN] 未加载下唇基线，跳过下唇调整。")
                 else:
                     print("\n>>> 自动进入下唇调整 (A19) ...\n")
                     tuner._lower_lip_flip = 1 if args.ll_flip else -1
@@ -3140,22 +3389,19 @@ def main():
                 # ---- 眉毛调整 (A0-A1) ----
                 passed_eb = False
                 iter_eb = 0
-                if not has_eyebrow_bl:
-                    print("[WARN] 未加载眉毛基线，跳过眉毛调整。")
+                print("\n>>> 自动进入眉毛调整 (A0-A1) ...\n")
+                tuner._eyebrow_a0_flip = 1 if args.eyebrow_a0_flip else -1
+                tuner._eyebrow_a1_flip = 1 if args.eyebrow_a1_flip else -1
+                passed_eb, iter_eb, _ = tuner.auto_adjust_eyebrow(
+                    ebhr_step=args.ebhr_step,
+                    max_iterations=args.eyebrow_max_iter,
+                    wait_seconds=args.eyebrow_wait,
+                    keep_display=has_eyelid_bl,
+                )
+                if passed_eb:
+                    print(f"[眉毛完成] A0-A1, {iter_eb}次")
                 else:
-                    print("\n>>> 自动进入眉毛调整 (A0-A1) ...\n")
-                    tuner._eyebrow_a0_flip = 1 if args.eyebrow_a0_flip else -1
-                    tuner._eyebrow_a1_flip = 1 if args.eyebrow_a1_flip else -1
-                    passed_eb, iter_eb, _ = tuner.auto_adjust_eyebrow(
-                        ebhr_step=args.ebhr_step,
-                        max_iterations=args.eyebrow_max_iter,
-                        wait_seconds=args.eyebrow_wait,
-                        keep_display=has_eyelid_bl,
-                    )
-                    if passed_eb:
-                        print(f"[眉毛完成] A0-A1, {iter_eb}次")
-                    else:
-                        print(f"[眉毛未通过] A0-A1, {iter_eb}次")
+                    print(f"[眉毛未通过] A0-A1, {iter_eb}次")
 
                 # ---- 眼皮调整 (A8-A9) ----
                 passed_el = False

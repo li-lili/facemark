@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <style>
+      .bg { fill: #0f1318; }
+      .grid { stroke: #28313b; stroke-width: 1; opacity: .45; }
+      .panel { fill: #151b22; stroke: #526170; stroke-width: 2; rx: 10; }
+      .auto { fill: #12324a; stroke: #36a3ff; stroke-width: 2; rx: 8; }
+      .ok { fill: #143522; stroke: #21d07a; stroke-width: 2; rx: 8; }
+      .warn { fill: #3a2021; stroke: #ff6b6b; stroke-width: 2; rx: 8; }
+      .text { fill: #e6edf3; font: 18px Consolas, "Microsoft YaHei", monospace; }
+      .small { fill: #c7d0db; font: 14px Consolas, "Microsoft YaHei", monospace; }
+      .tiny { fill: #9facbb; font: 12px Consolas, "Microsoft YaHei", monospace; }
+      .muted { fill: #93a1b1; font: 16px Consolas, "Microsoft YaHei", monospace; }
+      .line { stroke: #526170; stroke-width: 2; fill: none; opacity: .8; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1920" height="1080"/>
+  <path class="grid" d="M0 100H1920 M0 200H1920 M0 300H1920 M0 400H1920 M0 500H1920 M0 600H1920 M0 700H1920 M0 800H1920 M0 900H1920 M0 1000H1920"/>
+  <path class="grid" d="M100 0V1080 M200 0V1080 M300 0V1080 M400 0V1080 M500 0V1080 M600 0V1080 M700 0V1080 M800 0V1080 M900 0V1080 M1000 0V1080 M1100 0V1080 M1200 0V1080 M1300 0V1080 M1400 0V1080 M1500 0V1080 M1600 0V1080 M1700 0V1080 M1800 0V1080"/>
+
+  <text class="text" x="24" y="34">优化后 HUD 布局: 左侧动作提示 + 右侧参数信息栏</text>
+  <text class="small" x="24" y="58">右侧基准 x = max(340, img_w - 430)。1920 宽时 x = 1490。</text>
+
+  <!-- camera focus area -->
+  <rect x="430" y="120" width="850" height="780" rx="18" fill="#121820" stroke="#26313d" stroke-width="2" stroke-dasharray="10 8"/>
+  <text class="muted" x="760" y="520">中间画面尽量留给脸部和关键点</text>
+  <path class="line" d="M920 540H1000 M960 500V580"/>
+  <text class="tiny" x="984" y="532">中心十字/头部参考线</text>
+
+  <!-- top status -->
+  <rect class="ok" x="8" y="6" width="104" height="34"/>
+  <text class="small" x="18" y="28">PASS/FAIL</text>
+  <rect class="panel" x="1740" y="6" width="170" height="34"/>
+  <text class="small" x="1752" y="28">Cap FPS</text>
+
+  <!-- left transient HUD -->
+  <rect class="auto" x="10" y="82" width="360" height="104"/>
+  <text class="text" x="24" y="110">自动调整 HUD</text>
+  <text class="small" x="24" y="134">(10,100) 阶段 / Iter</text>
+  <text class="small" x="24" y="154">(10,118) 当前动作 / A8 A9</text>
+  <text class="small" x="24" y="174">(10,136) 极限 / 回退提示</text>
+
+  <rect class="ok" x="100" y="58" width="250" height="34"/>
+  <text class="small" x="112" y="80">通过提示 (100,80)</text>
+
+  <!-- right side panel -->
+  <rect class="panel" x="1470" y="36" width="430" height="430"/>
+  <text class="text" x="1490" y="66">右侧常驻参数栏</text>
+
+  <rect x="1486" y="76" width="390" height="54" rx="6" fill="#102633" stroke="#36a3ff"/>
+  <text class="small" x="1500" y="98">眼球偏移</text>
+  <text class="tiny" x="1500" y="116">(1490,44/62) L/R dX dY d</text>
+
+  <rect x="1486" y="136" width="390" height="70" rx="6" fill="#103222" stroke="#21d07a"/>
+  <text class="small" x="1500" y="158">眼皮 EAR</text>
+  <text class="tiny" x="1500" y="176">(1490,88) L_EAR</text>
+  <text class="tiny" x="1500" y="192">(1490,104/120) R_EAR / E_SYM</text>
+
+  <rect x="1486" y="214" width="390" height="88" rx="6" fill="#342b10" stroke="#ffcc33"/>
+  <text class="small" x="1500" y="236">眉毛 BIG + Slope</text>
+  <text class="tiny" x="1500" y="254">(1490,146/162) L_BIG / R_BIG</text>
+  <text class="tiny" x="1500" y="270">(1490,178/194) B_SYM / Slope</text>
+
+  <rect x="1486" y="310" width="390" height="72" rx="6" fill="#332016" stroke="#ff8a4c"/>
+  <text class="small" x="1500" y="332">嘴部参数</text>
+  <text class="tiny" x="1500" y="350">(1490,232/250/268) MAR / LLR / ULR</text>
+  <text class="tiny" x="1500" y="366">(1490,296...) MouthCorner</text>
+
+  <rect x="1486" y="390" width="390" height="62" rx="6" fill="#2b2140" stroke="#c084fc"/>
+  <text class="small" x="1500" y="412">头部 + 其他</text>
+  <text class="tiny" x="1500" y="430">(1490,354...) HeadPosition</text>
+  <text class="tiny" x="1500" y="446">(1490,412/430) mp0 / EyeLine</text>
+
+  <!-- bottom info -->
+  <rect class="panel" x="8" y="1040" width="360" height="32"/>
+  <text class="small" x="18" y="1062">左下: MP / EllSeg / Landmarks</text>
+  <rect class="panel" x="1590" y="1040" width="320" height="32"/>
+  <text class="small" x="1602" y="1062">右下: T / MP / Ell 耗时</text>
+
+  <!-- summary callouts -->
+  <rect class="warn" x="18" y="230" width="440" height="86"/>
+  <text class="text" x="34" y="258">优化点</text>
+  <text class="small" x="34" y="282">1. 眉毛和眼皮不再横向挤在一起</text>
+  <text class="small" x="34" y="302">2. 常驻参数集中到右侧，左侧只显示调整动作</text>
+</svg>

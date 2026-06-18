@@ -2,7 +2,7 @@
 EllSeg Scorer — 基线标定 + 虹膜偏移检测 → 舵机引导
 ======================================================
 核心逻辑：
-  1. 标定基线：保存鼻子+左右虹膜中心像素位置 → face_points.json
+  1. 标定基线：保存鼻子+左右虹膜中心像素位置 → face_point.json
   2. 偏移检测：实时对比当前帧与基线 (TOLERANCE=2px)
   3. 通过判定：规定帧数内，≥50% 帧合格(qualified)则通过
   4. 舵机引导：偏移方向反馈给舵机，指导眼球调整
@@ -16,15 +16,25 @@ import os, sys, subprocess, urllib.request, cv2, numpy as np, json, torch, threa
 DIR = os.path.dirname(os.path.abspath(__file__))
 ELLSEG_REPO = os.path.join(DIR, "EllSeg")
 WEIGHTS_PATH = os.path.join(ELLSEG_REPO, "weights", "all.git_ok")
-FACE_POINTS_FILE = os.path.join(DIR, "face_points.json")
+FACE_POINT_FILE = os.path.join(DIR, "face_point.json")
+LEGACY_FACE_POINTS_FILE = os.path.join(DIR, "face_points.json")
+FACE_POINTS_FILE = FACE_POINT_FILE
 EYELID_BASELINE_FILE = os.path.join(DIR, "eyelid_baseline.json")
 EYEBROW_BASELINE_FILE = os.path.join(DIR, "eyebrow_baseline.json")
+EYEBROW_BASELINE_MALE_FILE = os.path.join(DIR, "eyebrow_baseline_male.json")
+EYEBROW_BASELINE_FEMALE_FILE = os.path.join(DIR, "eyebrow_baseline_female.json")
 MOUTH_BASELINE_FILE = os.path.join(DIR, "mouth_baseline.json")
 LOWER_LIP_BASELINE_FILE = os.path.join(DIR, "lower_lip_baseline.json")
 UPPER_LIP_BASELINE_FILE = os.path.join(DIR, "upper_lip_baseline.json")
 MOUTH_CORNERS_BASELINE_FILE = os.path.join(DIR, "mouth_corners_baseline.json")
+HEAD_POSITION_BASELINE_FILE = os.path.join(DIR, "head_position_baseline.json")
+BASELINE_SECTIONS = (
+    "eyelid", "eyebrow", "mouth", "lower_lip", "upper_lip",
+    "mouth_corners", "head_position",
+)
+DEFAULT_TEMPLATE_NAME = "default"
 
-from eye_constants import EYEBALL_OFFSET_TOLERANCE
+from eye_constants import EYEBALL_OFFSET_TOLERANCE, EYELID_EAR_TOLERANCE
 TOLERANCE = EYEBALL_OFFSET_TOLERANCE        # 合格阈值 (像素)
 EMA_LM = 0.35         # MediaPipe 关键点 EMA
 EMA_ELL = 0.3         # EllSeg 椭圆 EMA
@@ -192,32 +202,292 @@ def run_ellseg(eye_gray):
 # ============================================================
 # 基线管理
 # ============================================================
+def _empty_template_data():
+    return {section: {} for section in BASELINE_SECTIONS}
+
+
+def _default_face_point_data():
+    return {
+        "version": 1,
+        "active_template": DEFAULT_TEMPLATE_NAME,
+        "common": {},
+        "templates": {DEFAULT_TEMPLATE_NAME: _empty_template_data()},
+    }
+
+
+def _read_json_file(path):
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[FacePoint] Read failed {path}: {e}")
+        return None
+
+
+def _write_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _normalize_face_point_data(data):
+    if not isinstance(data, dict):
+        data = {}
+    normalized = _default_face_point_data()
+    normalized.update({k: v for k, v in data.items() if k in ("version", "active_template", "common")})
+    if not isinstance(normalized.get("common"), dict):
+        normalized["common"] = {}
+
+    src_templates = data.get("templates")
+    if not isinstance(src_templates, dict):
+        src_templates = data.get("gender", {})
+        if data.get("active_gender") and not data.get("active_template"):
+            normalized["active_template"] = str(data["active_gender"])
+    if not isinstance(src_templates, dict):
+        src_templates = {}
+
+    normalized["templates"] = {}
+    for template_name, template_data in src_templates.items():
+        if not template_name:
+            continue
+        name = str(template_name)
+        normalized["templates"][name] = _empty_template_data()
+        if isinstance(template_data, dict):
+            for section in BASELINE_SECTIONS:
+                value = template_data.get(section, {})
+                normalized["templates"][name][section] = value if isinstance(value, dict) else {}
+    if not normalized["templates"]:
+        normalized["templates"][DEFAULT_TEMPLATE_NAME] = _empty_template_data()
+    if normalized["active_template"] not in normalized["templates"]:
+        normalized["active_template"] = next(iter(normalized["templates"]))
+    return normalized
+
+
+def _legacy_face_common():
+    d = _read_json_file(LEGACY_FACE_POINTS_FILE)
+    if not d:
+        return {}
+    try:
+        common = {
+            "nose": list(d["nose"]),
+            "iris_left": list(d["iris_left"]),
+            "iris_right": list(d["iris_right"]),
+        }
+        common["eye_line_y"] = float(d.get(
+            "eye_line_y",
+            (float(d["iris_left"][1]) + float(d["iris_right"][1])) / 2.0,
+        ))
+        return common
+    except Exception as e:
+        print(f"[FacePoint] Legacy common migration failed: {e}")
+        return {}
+
+
+def _legacy_section(section, path):
+    d = _read_json_file(path)
+    if not d:
+        return {}
+    try:
+        if section == "eyelid":
+            return {"left_ear": float(d["left_ear"]), "right_ear": float(d["right_ear"])}
+        if section == "eyebrow":
+            required = ("left_brow_iris_gap", "right_brow_iris_gap", "left_slope", "right_slope")
+            if not all(k in d for k in required):
+                return {}
+            return {
+                "left_slope": float(d["left_slope"]),
+                "right_slope": float(d["right_slope"]),
+                "slope_symmetry": float(d.get("slope_symmetry", 0.0)),
+                "left_brow_iris_gap": float(d["left_brow_iris_gap"]),
+                "right_brow_iris_gap": float(d["right_brow_iris_gap"]),
+            }
+        if section == "mouth":
+            return {"mar": float(d["mar"])}
+        if section == "lower_lip":
+            return {"llr": float(d["llr"])} if "llr" in d else {}
+        if section == "upper_lip":
+            return {"ulr": float(d["ulr"])}
+        if section == "mouth_corners":
+            return {
+                "nose": list(d["nose"]),
+                "corner_left": list(d["corner_left"]),
+                "corner_right": list(d["corner_right"]),
+            }
+        if section == "head_position":
+            return {
+                "nose_px": list(d["nose_px"]),
+                "eye_left": list(d["eye_left"]),
+                "eye_right": list(d["eye_right"]),
+                "frame_width": d.get("frame_width", 1920),
+                "frame_height": d.get("frame_height", 1080),
+                "eye_distance": d.get("eye_distance", 0.0),
+            }
+    except Exception as e:
+        print(f"[FacePoint] Legacy {section} migration failed: {e}")
+    return {}
+
+
+def _migrate_face_point_data():
+    data = _default_face_point_data()
+    data["common"] = _legacy_face_common()
+    default_template = data["active_template"]
+
+    legacy_sections = {
+        "eyelid": EYELID_BASELINE_FILE,
+        "mouth": MOUTH_BASELINE_FILE,
+        "lower_lip": LOWER_LIP_BASELINE_FILE,
+        "upper_lip": UPPER_LIP_BASELINE_FILE,
+        "mouth_corners": MOUTH_CORNERS_BASELINE_FILE,
+        "head_position": HEAD_POSITION_BASELINE_FILE,
+    }
+    for section, path in legacy_sections.items():
+        data["templates"][default_template][section] = _legacy_section(section, path)
+
+    male_brow = _legacy_section("eyebrow", EYEBROW_BASELINE_MALE_FILE)
+    female_brow = _legacy_section("eyebrow", EYEBROW_BASELINE_FEMALE_FILE)
+    active_brow = _legacy_section("eyebrow", EYEBROW_BASELINE_FILE)
+    if male_brow or active_brow:
+        data["templates"][DEFAULT_TEMPLATE_NAME]["eyebrow"] = male_brow or active_brow
+    if female_brow:
+        data["templates"].setdefault("template_2", _empty_template_data())
+        data["templates"]["template_2"]["eyebrow"] = female_brow
+    return data
+
+
+def load_face_point_data():
+    data = _read_json_file(FACE_POINT_FILE)
+    if data is None:
+        data = _migrate_face_point_data()
+        if data["common"] or any(
+            data["templates"][template][section]
+            for template in data["templates"]
+            for section in BASELINE_SECTIONS
+        ):
+            save_face_point_data(data)
+            print(f"[FacePoint] Migrated legacy baselines -> {FACE_POINT_FILE}")
+    return _normalize_face_point_data(data)
+
+
+def save_face_point_data(data):
+    data = _normalize_face_point_data(data)
+    _write_json_file(FACE_POINT_FILE, data)
+    return data
+
+
+def get_template_names():
+    return list(load_face_point_data().get("templates", {}).keys())
+
+
+def get_active_template():
+    return load_face_point_data().get("active_template", DEFAULT_TEMPLATE_NAME)
+
+
+def set_active_template(template_name):
+    template_name = str(template_name).strip()
+    if not template_name:
+        raise ValueError("Template name cannot be empty")
+    data = load_face_point_data()
+    data["templates"].setdefault(template_name, _empty_template_data())
+    data["active_template"] = template_name
+    save_face_point_data(data)
+    return True
+
+
+def save_current_as_template(template_name):
+    template_name = str(template_name).strip()
+    if not template_name:
+        raise ValueError("Template name cannot be empty")
+    data = load_face_point_data()
+    active = data["active_template"]
+    source = data["templates"].get(active, _empty_template_data())
+    data["templates"][template_name] = json.loads(json.dumps(source))
+    data["active_template"] = template_name
+    save_face_point_data(data)
+    return True
+
+
+def _load_common_baseline():
+    common = load_face_point_data().get("common", {})
+    if not common:
+        return None
+    try:
+        return {
+            "nose": tuple(common["nose"]),
+            "iris_left": tuple(common["iris_left"]),
+            "iris_right": tuple(common["iris_right"]),
+            "eye_line_y": float(common.get(
+                "eye_line_y",
+                (float(common["iris_left"][1]) + float(common["iris_right"][1])) / 2.0,
+            )),
+        }
+    except Exception as e:
+        print(f"[FacePoint] Common baseline invalid: {e}")
+        return None
+
+
+def _save_common_baseline(common):
+    data = load_face_point_data()
+    data["common"] = common
+    save_face_point_data(data)
+
+
+def _load_template_section(section, template_name=None):
+    if template_name is None:
+        template_name = get_active_template()
+    data = load_face_point_data()
+    value = data["templates"].get(template_name, {}).get(section, {})
+    return value.copy() if isinstance(value, dict) and value else None
+
+
+def _save_template_section(section, value, template_name=None):
+    if template_name is None:
+        template_name = get_active_template()
+    data = load_face_point_data()
+    data["templates"].setdefault(template_name, _empty_template_data())
+    data["templates"][template_name][section] = value
+    save_face_point_data(data)
+
+
+def template_section_exists(template_name, section):
+    value = _load_template_section(section, template_name=template_name)
+    return bool(value)
+
+
 def save_baseline(nose_pos, left_iris_pos, right_iris_pos, filepath=None):
-    if filepath is None:
-        filepath = FACE_POINTS_FILE
+    eye_line_y = (left_iris_pos[1] + right_iris_pos[1]) / 2.0
     data = {
         "nose": list(nose_pos),
         "iris_left": list(left_iris_pos),
         "iris_right": list(right_iris_pos),
+        "eye_line_y": eye_line_y,
     }
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    print(f"[Baseline] Saved: nose={nose_pos} L={left_iris_pos} R={right_iris_pos}")
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_common_baseline(data)
+    print(f"[Baseline] Saved: nose={nose_pos} L={left_iris_pos} R={right_iris_pos} eyeY={eye_line_y:.2f}")
 
 
 def load_baseline(filepath=None):
     if filepath is None:
-        filepath = FACE_POINTS_FILE
-    if not os.path.isfile(filepath):
-        return None
+        return _load_common_baseline()
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
-        return {
+        d = _read_json_file(filepath)
+        if not d:
+            return None
+        bl = {
             "nose": tuple(d["nose"]),
             "iris_left": tuple(d["iris_left"]),
             "iris_right": tuple(d["iris_right"]),
         }
+        # 向后兼容：旧基线没有 eye_line_y，自动推算
+        if "eye_line_y" in d:
+            bl["eye_line_y"] = float(d["eye_line_y"])
+        else:
+            bl["eye_line_y"] = (d["iris_left"][1] + d["iris_right"][1]) / 2.0
+            print(f"[Baseline] eye_line_y auto-derived: {bl['eye_line_y']:.2f}")
+        return bl
     except Exception as e:
         print(f"[Baseline] Load failed: {e}")
         return None
@@ -227,25 +497,22 @@ def load_baseline(filepath=None):
 # 眼皮基线管理
 # ============================================================
 def save_eyelid_baseline(left_ear, right_ear, filepath=None):
-    if filepath is None:
-        filepath = EYELID_BASELINE_FILE
     data = {
         "left_ear": float(left_ear),
         "right_ear": float(right_ear),
     }
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("eyelid", data)
     print(f"[Eyelid Baseline] Saved: L_EAR={left_ear:.4f} R_EAR={right_ear:.4f}")
 
 
 def load_eyelid_baseline(filepath=None):
-    if filepath is None:
-        filepath = EYELID_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
+        d = _load_template_section("eyelid") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
         return {
             "left_ear": float(d["left_ear"]),
             "right_ear": float(d["right_ear"]),
@@ -258,24 +525,50 @@ def load_eyelid_baseline(filepath=None):
 # ============================================================
 # 眉毛基线管理
 # ============================================================
-def save_eyebrow_baseline(left_ebhr, right_ebhr, filepath=None):
-    if filepath is None:
-        filepath = EYEBROW_BASELINE_FILE
-    data = {"left_ebhr": float(left_ebhr), "right_ebhr": float(right_ebhr)}
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    print(f"[Eyebrow Baseline] Saved: L_EBHR={left_ebhr:.4f} R_EBHR={right_ebhr:.4f}")
+def save_eyebrow_baseline(metrics, filepath=None):
+    data = {}
+    for key in (
+        "left_slope", "right_slope",
+        "slope_symmetry",
+        "left_brow_iris_gap", "right_brow_iris_gap",
+    ):
+        if key in metrics:
+            data[key] = float(metrics[key])
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("eyebrow", data)
+    print(
+        "[Eyebrow Baseline] Saved: "
+        f"L_S={metrics['left_slope']:.4f} R_S={metrics['right_slope']:.4f} | "
+        f"L_BIG={metrics['left_brow_iris_gap']:.4f} "
+        f"R_BIG={metrics['right_brow_iris_gap']:.4f}"
+    )
 
 
 def load_eyebrow_baseline(filepath=None):
-    if filepath is None:
-        filepath = EYEBROW_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
-        return {"left_ebhr": float(d["left_ebhr"]), "right_ebhr": float(d["right_ebhr"])}
+        d = _load_template_section("eyebrow") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
+        has_required = all(
+            key in d
+            for key in (
+                "left_brow_iris_gap", "right_brow_iris_gap",
+                "left_slope", "right_slope",
+            )
+        )
+        if not has_required:
+            print("[Eyebrow Baseline] Missing BIG/slope fields; ignoring old eyebrow baseline.")
+            return None
+        return {
+            "left_slope": float(d["left_slope"]),
+            "right_slope": float(d["right_slope"]),
+            "slope_symmetry": float(d.get("slope_symmetry", 0.0)),
+            "left_brow_iris_gap": float(d["left_brow_iris_gap"]),
+            "right_brow_iris_gap": float(d["right_brow_iris_gap"]),
+            "has_brow_iris_gap": True,
+        }
     except Exception as e:
         print(f"[Eyebrow Baseline] Load failed: {e}")
         return None
@@ -285,22 +578,19 @@ def load_eyebrow_baseline(filepath=None):
 # 嘴部基线管理
 # ============================================================
 def save_mouth_baseline(mar, filepath=None):
-    if filepath is None:
-        filepath = MOUTH_BASELINE_FILE
     data = {"mar": float(mar)}
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("mouth", data)
     print(f"[Mouth Baseline] Saved: MAR={mar:.4f}")
 
 
 def load_mouth_baseline(filepath=None):
-    if filepath is None:
-        filepath = MOUTH_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
+        d = _load_template_section("mouth") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
         return {"mar": float(d["mar"])}
     except Exception as e:
         print(f"[Mouth Baseline] Load failed: {e}")
@@ -311,21 +601,18 @@ def load_mouth_baseline(filepath=None):
 # 下唇基线管理
 # ============================================================
 def save_lower_lip_baseline(llr, filepath=None):
-    if filepath is None:
-        filepath = LOWER_LIP_BASELINE_FILE
     data = {"llr": float(llr)}
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("lower_lip", data)
     print(f"[LowerLip Baseline] Saved: LLR={llr:.4f}")
 
 def load_lower_lip_baseline(filepath=None):
-    if filepath is None:
-        filepath = LOWER_LIP_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
+        d = _load_template_section("lower_lip") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
         # 兼容旧格式 {llt, llp}
         if "llr" in d:
             return {"llr": float(d["llr"])}
@@ -340,21 +627,18 @@ def load_lower_lip_baseline(filepath=None):
 # 上唇基线管理
 # ============================================================
 def save_upper_lip_baseline(ulr, filepath=None):
-    if filepath is None:
-        filepath = UPPER_LIP_BASELINE_FILE
     data = {"ulr": float(ulr)}
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("upper_lip", data)
     print(f"[UpperLip Baseline] Saved: ULR={ulr:.4f}")
 
 def load_upper_lip_baseline(filepath=None):
-    if filepath is None:
-        filepath = UPPER_LIP_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
+        d = _load_template_section("upper_lip") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
         return {"ulr": float(d["ulr"])}
     except Exception as e:
         print(f"[UpperLip Baseline] Load failed: {e}")
@@ -365,26 +649,23 @@ def load_upper_lip_baseline(filepath=None):
 # 嘴角基线管理 — A22-A25
 # ============================================================
 def save_mouth_corners_baseline(nose_pos, left_corner_pos, right_corner_pos, filepath=None):
-    if filepath is None:
-        filepath = MOUTH_CORNERS_BASELINE_FILE
     data = {
         "nose": list(nose_pos),
         "corner_left": list(left_corner_pos),
         "corner_right": list(right_corner_pos),
     }
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("mouth_corners", data)
     print(f"[MouthCorners Baseline] Saved: nose={nose_pos} L_corner={left_corner_pos} R_corner={right_corner_pos}")
 
 
 def load_mouth_corners_baseline(filepath=None):
-    if filepath is None:
-        filepath = MOUTH_CORNERS_BASELINE_FILE
-    if not os.path.isfile(filepath):
-        return None
     try:
-        with open(filepath, encoding="utf-8") as f:
-            d = json.load(f)
+        d = _load_template_section("mouth_corners") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
         return {
             "nose": tuple(d["nose"]),
             "corner_left": tuple(d["corner_left"]),
@@ -392,6 +673,47 @@ def load_mouth_corners_baseline(filepath=None):
         }
     except Exception as e:
         print(f"[MouthCorners Baseline] Load failed: {e}")
+        return None
+
+
+# ============================================================
+# 头部定位基线管理 — 鼻尖+眼线
+# ============================================================
+def save_head_position_baseline(nose_px, eye_left_px, eye_right_px,
+                                 frame_width, frame_height, filepath=None):
+    eye_dist = np.linalg.norm(np.array(eye_right_px, dtype=np.float64)
+                              - np.array(eye_left_px, dtype=np.float64))
+    data = {
+        "nose_px": list(nose_px),
+        "eye_left": list(eye_left_px),
+        "eye_right": list(eye_right_px),
+        "frame_width": frame_width,
+        "frame_height": frame_height,
+        "eye_distance": round(float(eye_dist), 1),
+    }
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("head_position", data)
+    print(f"[HeadPosition Baseline] Saved: nose={nose_px} L_eye={eye_left_px} "
+          f"R_eye={eye_right_px} eye_dist={eye_dist:.1f}")
+
+
+def load_head_position_baseline(filepath=None):
+    try:
+        d = _load_template_section("head_position") if filepath is None else _read_json_file(filepath)
+        if not d:
+            return None
+        return {
+            "nose_px": tuple(d["nose_px"]),
+            "eye_left": tuple(d["eye_left"]),
+            "eye_right": tuple(d["eye_right"]),
+            "frame_width": d.get("frame_width", 1920),
+            "frame_height": d.get("frame_height", 1080),
+            "eye_distance": d.get("eye_distance", 0.0),
+        }
+    except Exception as e:
+        print(f"[HeadPosition Baseline] Load failed: {e}")
         return None
 
 
@@ -421,6 +743,8 @@ class EllSegDetector:
         self.enable_mp = False        # MediaPipe 人脸关键点检测
         self.enable_ellseg = False    # EllSeg 虹膜椭圆检测
         self.show_all_landmarks = False  # 显示所有 MediaPipe 关键点
+        self.show_baseline_overlay = False  # 叠加显示标准眼球位置基线
+        self.show_eye_line_offset = False  # 显示参考线垂直偏移 HUD
 
         print("[Detector] Initializing MediaPipe...")
         self.landmarker = _init_mediapipe()
@@ -458,7 +782,7 @@ class EllSegDetector:
         # 眼皮基线
         self.eyelid_baseline = load_eyelid_baseline()
         if self.eyelid_baseline:
-            print(f"[Eyelid Baseline] Loaded from {EYELID_BASELINE_FILE}")
+            print(f"[Eyelid Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
             print(f"  L_EAR = {self.eyelid_baseline['left_ear']:.4f}")
             print(f"  R_EAR = {self.eyelid_baseline['right_ear']:.4f}")
         else:
@@ -467,16 +791,15 @@ class EllSegDetector:
         # 眉毛基线
         self.eyebrow_baseline = load_eyebrow_baseline()
         if self.eyebrow_baseline:
-            print(f"[Eyebrow Baseline] Loaded from {EYEBROW_BASELINE_FILE}")
-            print(f"  L_EBHR = {self.eyebrow_baseline['left_ebhr']:.4f}")
-            print(f"  R_EBHR = {self.eyebrow_baseline['right_ebhr']:.4f}")
+            print(f"[Eyebrow Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
+            print(f"  L_S = {self.eyebrow_baseline['left_slope']:.4f}  R_S = {self.eyebrow_baseline['right_slope']:.4f}")
         else:
-            print("[Eyebrow Baseline] No eyebrow baseline found.")
+            print("[Eyebrow Baseline] No custom eyebrow baseline found; eyebrow check disabled.")
 
         # 嘴部基线
         self.mouth_baseline = load_mouth_baseline()
         if self.mouth_baseline:
-            print(f"[Mouth Baseline] Loaded from {MOUTH_BASELINE_FILE}")
+            print(f"[Mouth Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
             print(f"  MAR = {self.mouth_baseline['mar']:.4f}")
         else:
             print("[Mouth Baseline] No mouth baseline found.")
@@ -484,7 +807,7 @@ class EllSegDetector:
         # 下唇基线
         self.lower_lip_baseline = load_lower_lip_baseline()
         if self.lower_lip_baseline:
-            print(f"[LowerLip Baseline] Loaded from {LOWER_LIP_BASELINE_FILE}")
+            print(f"[LowerLip Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
             print(f"  LLR = {self.lower_lip_baseline['llr']:.4f}")
         else:
             print("[LowerLip Baseline] No lower lip baseline found.")
@@ -492,7 +815,7 @@ class EllSegDetector:
         # 上唇基线
         self.upper_lip_baseline = load_upper_lip_baseline()
         if self.upper_lip_baseline:
-            print(f"[UpperLip Baseline] Loaded from {UPPER_LIP_BASELINE_FILE}")
+            print(f"[UpperLip Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
             print(f"  ULR = {self.upper_lip_baseline['ulr']:.4f}")
         else:
             print("[UpperLip Baseline] No upper lip baseline found.")
@@ -500,12 +823,23 @@ class EllSegDetector:
         # 嘴角基线
         self.mouth_corners_baseline = load_mouth_corners_baseline()
         if self.mouth_corners_baseline:
-            print(f"[MouthCorners Baseline] Loaded from {MOUTH_CORNERS_BASELINE_FILE}")
+            print(f"[MouthCorners Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
             print(f"  nose   = {self.mouth_corners_baseline['nose']}")
             print(f"  L_corner = {self.mouth_corners_baseline['corner_left']}")
             print(f"  R_corner = {self.mouth_corners_baseline['corner_right']}")
         else:
             print("[MouthCorners Baseline] No mouth corners baseline found.")
+
+        # 头部定位基线
+        self.head_position_baseline = load_head_position_baseline()
+        if self.head_position_baseline:
+            print(f"[HeadPosition Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
+            print(f"  nose   = {self.head_position_baseline['nose_px']}")
+            print(f"  L_eye  = {self.head_position_baseline['eye_left']}")
+            print(f"  R_eye  = {self.head_position_baseline['eye_right']}")
+            print(f"  eye_dist = {self.head_position_baseline['eye_distance']:.1f}")
+        else:
+            print("[HeadPosition Baseline] No head position baseline found.")
 
         self._timestamp = 0
         self.last_result = None
@@ -583,32 +917,64 @@ class EllSegDetector:
                 if det.get("right_iris"):
                     cv2.circle(img, det["right_iris"], 4, (0, 255, 255), -1)
 
-                # PASS/FAIL + 偏移 HUD
+                # 标准眼球位置基线叠加 (G 键开关)
+                if self.show_baseline_overlay and self.baseline:
+                    bl = self.baseline
+                    # 半透明图层
+                    overlay = img.copy()
+                    # 标准眼球位置 — 大虚线圈
+                    bl_nose = (int(bl["nose"][0]), int(bl["nose"][1]))
+                    bl_L = (int(bl["iris_left"][0]), int(bl["iris_left"][1]))
+                    bl_R = (int(bl["iris_right"][0]), int(bl["iris_right"][1]))
+                    cv2.circle(overlay, bl_nose, 16, (0, 255, 0), 2)
+                    cv2.circle(overlay, bl_L, 16, (255, 255, 0), 2)
+                    cv2.circle(overlay, bl_R, 16, (255, 255, 0), 2)
+                    # 连线: 鼻尖→左眼 / 鼻尖→右眼 (显示标准三角)
+                    cv2.line(overlay, bl_nose, bl_L, (0, 255, 0), 1, cv2.LINE_AA)
+                    cv2.line(overlay, bl_nose, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
+                    cv2.line(overlay, bl_L, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
+                    # 混入透明
+                    img = cv2.addWeighted(overlay, 0.45, img, 0.55, 0)
+                    # 标签
+                    cv2.putText(img, "Baseline", (bl_nose[0] + 20, bl_nose[1] - 10),
+                               0, 0.4, (0, 255, 0), 1)
+
+                # PASS/FAIL + 常驻 HUD。
+                # 右侧信息栏统一承载检测参数，左侧留给 auto_adjust 的临时提示。
                 q = det.get("qualified", False)
                 cv2.putText(img, f"{'PASS' if q else 'FAIL'}", (10, 22), 0, 0.55,
                            (0, 255, 0) if q else (0, 0, 255), 1)
-                y = 44
+                x_off = max(340, img.shape[1] - 430)
+                y_off = 44
                 off = det.get("offset", {})
                 for label, o in [("L", off.get("left")), ("R", off.get("right"))]:
                     if o:
                         dx, dy, d = o
                         cv2.putText(img,
                                    f"{label}:dX={dx:+.1f} dY={dy:+.1f} d={d:.1f}px",
-                                   (10, y), 0, 0.35,
+                                   (x_off, y_off), 0, 0.35,
                                    (0, 255, 0) if d <= TOLERANCE else (0, 0, 255), 1)
-                    y += 18
+                    y_off += 18
 
-                # mp0(人中) 实时坐标 — 画面左侧
+                # 参考线垂直偏移 HUD (Y 键开关)
+                if self.show_eye_line_offset and off:
+                    dy_eye = off.get("_dy_eye_line", 0.0)
+                    color = (0, 255, 255) if abs(dy_eye) < 3 else (0, 165, 255)
+                    cv2.putText(img,
+                               f"EyeLine dY={dy_eye:+.1f}px",
+                               (x_off, 430), 0, 0.38, color, 1)
+
+                # mp0(人中) 实时坐标 — 右侧
                 if hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     mp0 = self._last_lms_smooth[0]
-                    cv2.putText(img, f"mp0:({mp0[0]:.0f},{mp0[1]:.0f})", (10, 400), 0, 0.35, (255, 200, 0), 1)
+                    cv2.putText(img, f"mp0:({mp0[0]:.0f},{mp0[1]:.0f})", (x_off, 412), 0, 0.35, (255, 200, 0), 1)
 
                 # FPS 显示 (来自主采集线程的实际捕获速率)
                 cap_fps = self._capture_fps
                 cv2.putText(img, f"Cap FPS: {cap_fps:.1f}", (img.shape[1] - 170, 22),
                            0, 0.45, (200, 200, 200), 1)
 
-                # EAR 眼皮高宽比 (如果有基线)
+                # EAR 眼皮高宽比 (如果有基线) — 放到右侧
                 if self.eyelid_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_eyelid_signal()
                     if signal:
@@ -617,72 +983,86 @@ class EllSegDetector:
                         r_ear = signal["right_ear"]
                         l_ok = signal["left_qualified"]
                         r_ok = signal["right_qualified"]
-                        y_ear = 80
+                        e_sym = signal["eyelid_symmetry"]
+                        e_sym_color = (0, 255, 0) if signal["symmetry_qualified"] else (0, 0, 255)
+                        x_eye = x_off
+                        y_eye = 88
                         cv2.putText(img, f"L_EAR={l_ear:.3f} (bl={bl['left_ear']:.3f})",
-                                   (10, y_ear), 0, 0.35,
+                                   (x_eye, y_eye), 0, 0.35,
                                    (0, 255, 0) if l_ok else (0, 0, 255), 1)
                         cv2.putText(img, f"R_EAR={r_ear:.3f} (bl={bl['right_ear']:.3f})",
-                                   (10, y_ear + 16), 0, 0.35,
+                                   (x_eye, y_eye + 16), 0, 0.35,
                                    (0, 255, 0) if r_ok else (0, 0, 255), 1)
+                        cv2.putText(img, f"E_SYM={e_sym:.4f} <= {EYELID_EAR_TOLERANCE}",
+                                   (x_eye, y_eye + 32), 0, 0.35,
+                                   e_sym_color, 1)
 
-                # EBHR 眉毛高度比 (如果有基线)
-                if self.eyebrow_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                # Eyebrow BIG + slope status.
+                if hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_eyebrow_signal()
                     if signal:
-                        bl = self.eyebrow_baseline
-                        l_ebhr = signal["left_ebhr"]
-                        r_ebhr = signal["right_ebhr"]
                         l_ok = signal["left_qualified"]
                         r_ok = signal["right_qualified"]
-                        y_brow = 115
-                        cv2.putText(img, f"L_EBHR={l_ebhr:.3f} (bl={bl['left_ebhr']:.3f})",
-                                   (10, y_brow), 0, 0.35,
-                                   (0, 255, 0) if l_ok else (0, 0, 255), 1)
-                        cv2.putText(img, f"R_EBHR={r_ebhr:.3f} (bl={bl['right_ebhr']:.3f})",
-                                   (10, y_brow + 16), 0, 0.35,
-                                   (0, 255, 0) if r_ok else (0, 0, 255), 1)
+                        x_brow = x_off
+                        y_brow = 146
+                        left_color = (0, 255, 0) if l_ok else (0, 0, 255)
+                        right_color = (0, 255, 0) if r_ok else (0, 0, 255)
+                        sym_color = (0, 255, 0) if signal["big_symmetry_ok"] else (0, 0, 255)
+                        slope_color = (0, 255, 0) if signal["slope_range_qualified"] else (0, 0, 255)
+                        cv2.putText(img, f"L_BIG={signal['left_brow_iris_gap']:+.3f} [{signal['left_position_min']:+.2f},{signal['left_position_max']:+.2f}]",
+                                   (x_brow, y_brow), 0, 0.35,
+                                   left_color, 1)
+                        cv2.putText(img, f"R_BIG={signal['right_brow_iris_gap']:+.3f} [{signal['right_position_min']:+.2f},{signal['right_position_max']:+.2f}]",
+                                   (x_brow, y_brow + 16), 0, 0.35,
+                                   right_color, 1)
+                        cv2.putText(img, f"B_SYM={signal['big_symmetry']:.3f} <= {signal['big_symmetry_tolerance']:.3f}",
+                                   (x_brow, y_brow + 32), 0, 0.35,
+                                   sym_color, 1)
+                        cv2.putText(img, f"S L={signal['left_slope']:+.2f} R={signal['right_slope']:+.2f} {'OK' if signal['slope_range_qualified'] else 'BAD'}",
+                                   (x_brow, y_brow + 48), 0, 0.35,
+                                   slope_color, 1)
 
-                # MAR 嘴部高宽比 (如果有基线)
+                # MAR 嘴部高宽比 (如果有基线) — 右侧
                 if self.mouth_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_mouth_signal()
                     if signal:
                         bl = self.mouth_baseline
                         mar = signal["mar"]
                         ok = signal["qualified"]
-                        y_mouth = 150
+                        y_mouth = 232
                         cv2.putText(img, f"MAR={mar:.3f} (bl={bl['mar']:.3f})",
-                                   (10, y_mouth), 0, 0.35,
+                                   (x_off, y_mouth), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
 
-                # LLR 下唇比例 (如果有基线)
+                # LLR 下唇比例 (如果有基线) — 右侧
                 if self.lower_lip_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_lower_lip_signal()
                     if signal:
                         bl = self.lower_lip_baseline
                         ok = signal["qualified"]
-                        y_ll = 168
+                        y_ll = 250
                         cv2.putText(img, f"LLR={signal['llr']:.3f} (bl={bl['llr']:.3f})",
-                                   (10, y_ll), 0, 0.35,
+                                   (x_off, y_ll), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
 
-                # ULR 上唇比例 (如果有基线)
+                # ULR 上唇比例 (如果有基线) — 右侧
                 if self.upper_lip_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_upper_lip_signal()
                     if signal:
                         bl = self.upper_lip_baseline
                         ok = signal["qualified"]
-                        y_ul = 202
+                        y_ul = 268
                         cv2.putText(img, f"ULR={signal['ulr']:.3f} (bl={bl['ulr']:.3f})",
-                                   (10, y_ul), 0, 0.35,
+                                   (x_off, y_ul), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
 
-                # 嘴角偏移 HUD (如果有基线)
+                # 嘴角偏移 HUD (如果有基线) — 右侧
                 if self.mouth_corners_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_mouth_corner_signal()
                     if signal:
-                        y_mc = 220
+                        y_mc = 296
                         cv2.putText(img, "MouthCorner:",
-                                   (10, y_mc), 0, 0.35, (255, 200, 0), 1)
+                                   (x_off, y_mc), 0, 0.35, (255, 200, 0), 1)
                         y_mc += 16
                         for label, key in [("L", "left"), ("R", "right")]:
                             d = signal.get(key, {})
@@ -690,9 +1070,69 @@ class EllSegDetector:
                             ok = d.get("qualified", False)
                             cv2.putText(img,
                                        f"  {label}:dX={dx:+.1f} dY={dy:+.1f} d={dist:.1f}px",
-                                       (10, y_mc), 0, 0.35,
+                                       (x_off, y_mc), 0, 0.35,
                                        (0, 255, 0) if ok else (0, 0, 255), 1)
                             y_mc += 16
+
+                # 头部定位 HUD — 鼻尖+倾斜+对称 (如果有基线) — 右侧
+                if self.head_position_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                    signal = self.get_head_signal()
+                    if signal:
+                        y_hd = 354
+                        cv2.putText(img, "HeadPosition:",
+                                   (x_off, y_hd), 0, 0.35, (255, 180, 0), 1)
+                        y_hd += 16
+                        # 鼻尖偏移
+                        nose_ok = signal["nose_ok"]
+                        cv2.putText(img,
+                                   f"  Nose: dX={signal['nose_dx']:+.1f} dY={signal['nose_dy']:+.1f}",
+                                   (x_off, y_hd), 0, 0.35,
+                                   (0, 255, 0) if nose_ok else (0, 0, 255), 1)
+                        y_hd += 16
+                        # 倾斜
+                        tilt_ok = signal["tilt_ok"]
+                        cv2.putText(img,
+                                   f"  Tilt: {signal['tilt_deg']:+.1f}°",
+                                   (x_off, y_hd), 0, 0.35,
+                                   (0, 255, 0) if tilt_ok else (0, 0, 255), 1)
+                        y_hd += 16
+                        # 对称
+                        sym_ok = signal["symmetry_ok"]
+                        cv2.putText(img,
+                                   f"  Sym:  {signal['symmetry']:.3f}",
+                                   (x_off, y_hd), 0, 0.35,
+                                   (0, 255, 0) if sym_ok else (0, 0, 255), 1)
+                        # 画面中心十字线 (画面正中央)
+                        cx = img.shape[1] // 2
+                        cy = img.shape[0] // 2
+                        # 淡黄色虚十字
+                        cross_color = (0, 215, 255)
+                        cv2.line(img, (cx - 40, cy), (cx - 10, cy), cross_color, 1)
+                        cv2.line(img, (cx + 10, cy), (cx + 40, cy), cross_color, 1)
+                        cv2.line(img, (cx, cy - 40), (cx, cy - 10), cross_color, 1)
+                        cv2.line(img, (cx, cy + 10), (cx, cy + 40), cross_color, 1)
+                        # 蓝色眼线: 当前左右眼外角连线
+                        from eye_constants import HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX
+                        eye_L = self._last_lms_smooth[HEAD_EYE_LEFT_IDX]
+                        eye_R = self._last_lms_smooth[HEAD_EYE_RIGHT_IDX]
+                        cv2.line(img,
+                                 (int(eye_L[0]), int(eye_L[1])),
+                                 (int(eye_R[0]), int(eye_R[1])),
+                                 (255, 150, 0), 1)
+                        # 基线眼线位置 (半透明白色)
+                        bl = self.head_position_baseline
+                        cv2.line(img,
+                                 (int(bl["eye_left"][0]), int(bl["eye_left"][1])),
+                                 (int(bl["eye_right"][0]), int(bl["eye_right"][1])),
+                                 (255, 255, 200), 1, cv2.LINE_AA)
+                        # 鼻尖到基线鼻尖的偏移指示箭头 (红色)
+                        if abs(signal["nose_dx"]) > 0.5 or abs(signal["nose_dy"]) > 0.5:
+                            nose_cur = self._last_lms_smooth[1]  # HEAD_NOSE_IDX=1
+                            nose_bl = (int(bl["nose_px"][0]), int(bl["nose_px"][1]))
+                            cv2.line(img,
+                                     (int(nose_cur[0]), int(nose_cur[1])),
+                                     nose_bl,
+                                     (0, 0, 255), 1)
 
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
@@ -712,7 +1152,7 @@ class EllSegDetector:
                     for i in range(lms.shape[0]):
                         px, py = int(lms[i, 0]), int(lms[i, 1])
                         cv2.circle(img, (px, py), 1, (180, 180, 255), -1)
-                        cv2.putText(img, str(i), (px + 2, py - 1), 0, 0.22, (180, 180, 255), 1)
+                        cv2.putText(img, str(i), (px + 2, py - 1), 0,  0.4, (180, 180, 255), 1)
 
                 cv2.imshow("EllSeg Detect", img)
 
@@ -731,6 +1171,14 @@ class EllSegDetector:
                 elif key == ord('3'):
                     self.show_all_landmarks = not self.show_all_landmarks
                     print(f"[Detector] Show Landmarks: {'ON' if self.show_all_landmarks else 'OFF'}")
+                elif key == ord('g') or key == ord('G'):
+                    # 但注意不能和 [C] 等冲突: ord('G')=71, ord('g')=103
+                    if not self.show_all_landmarks:
+                        self.show_baseline_overlay = not self.show_baseline_overlay
+                        print(f"[Detector] Show Baseline Overlay: {'ON' if self.show_baseline_overlay else 'OFF'}")
+                elif key == ord('y') or key == ord('Y'):
+                    self.show_eye_line_offset = not self.show_eye_line_offset
+                    print(f"[Detector] Show EyeLine Offset: {'ON' if self.show_eye_line_offset else 'OFF'}")
                 elif key in (ord('q'), ord('Q'), 27):
                     self._user_key = key
 
@@ -772,11 +1220,23 @@ class EllSegDetector:
                 "frame": frame, "reason": reason}
 
     def _calc_offset(self, det):
-        """计算与基线的偏移。返回 {"left": (dx,dy,dist), "right": ..., "nose": ...}"""
+        """计算与基线的偏移。返回 {"left": (dx,dy,dist), "right": ..., "nose": ..., "_dy_eye_line": float}"""
         if not self.baseline or self.baseline.get("nose") is None:
             return {}
         bl = self.baseline
         offset = {}
+
+        # 计算参考线垂直偏移 (左右虹膜 Y 均值差)
+        dy_eye_line = 0.0
+        bl_eye_line = bl.get("eye_line_y")
+        if bl_eye_line is not None:
+            li = det.get("left_iris")
+            ri = det.get("right_iris")
+            if li is not None and ri is not None:
+                cur_line = (li[1] + ri[1]) / 2.0
+                dy_eye_line = cur_line - bl_eye_line
+        offset["_dy_eye_line"] = dy_eye_line
+
         key_map = {"left": "iris_left", "right": "iris_right", "nose": "nose"}
         for key, cur_pos in [("left", det.get("left_iris")),
                               ("right", det.get("right_iris")),
@@ -1002,10 +1462,12 @@ class EllSegDetector:
                 or det["left_iris"] is None or det["right_iris"] is None:
             print("[Baseline] Cannot save: points missing")
             return False
+        eye_line_y = (det["left_iris"][1] + det["right_iris"][1]) / 2.0
         self.baseline = {
             "nose": det["nose"],
             "iris_left": det["left_iris"],
             "iris_right": det["right_iris"],
+            "eye_line_y": eye_line_y,
         }
         save_baseline(
             nose_pos=self.baseline["nose"],
@@ -1067,31 +1529,88 @@ class EllSegDetector:
         }
 
     @staticmethod
-    def _calc_ebhr(lms_smooth, brow_points, corners):
-        """
-        计算单眉 Eyebrow Height Ratio。
-        EBHR = (眉弓Y均值 - 眼角Y均值) / 眼宽
-        """
-        brow_y = np.mean([lms_smooth[i, 1] for i in brow_points])
-        corner_y = np.mean([lms_smooth[i, 1] for i in corners])
+    def _calc_brow_geometry(lms_smooth, brow_points, corners):
+        """Calculate one eyebrow's mirrored slope."""
         outer_i, inner_i = corners
-        eye_width = abs(lms_smooth[inner_i, 0] - lms_smooth[outer_i, 0])
+        outer = lms_smooth[outer_i]
+        inner = lms_smooth[inner_i]
+        eye_width = abs(inner[0] - outer[0])
         if eye_width < 1e-6:
-            return 0.0
-        return float((brow_y - corner_y) / eye_width)
+            return {"slope": 0.0}
+
+        brow_xy = np.array([lms_smooth[i] for i in brow_points], dtype=float)
+        d_inner = np.linalg.norm(brow_xy - inner, axis=1)
+        d_outer = np.linalg.norm(brow_xy - outer, axis=1)
+        inner_brow = brow_xy[int(np.argmin(d_inner))]
+        outer_brow = brow_xy[int(np.argmin(d_outer))]
+        return {"slope": float((outer_brow[1] - inner_brow[1]) / eye_width)}
 
     @staticmethod
-    def _calc_ebhrs(lms_smooth):
-        """计算双眼 EBHR。"""
+    def _calc_brow_iris_gaps(lms_smooth):
+        """
+        Project each brow-to-iris vector onto the axis perpendicular to the
+        two iris centers, then normalize by that eye's corner-to-corner width.
+        """
+        from eye_constants import (
+            LEFT_BROW_IRIS_POINTS, RIGHT_BROW_IRIS_POINTS,
+            LEFT_BROW_IRIS_WEIGHTS, RIGHT_BROW_IRIS_WEIGHTS,
+            LEFT_IRIS_CENTER, RIGHT_IRIS_CENTER,
+            LEFT_BROW_CORNERS, RIGHT_BROW_CORNERS,
+        )
+
+        left_iris = lms_smooth[LEFT_IRIS_CENTER]
+        right_iris = lms_smooth[RIGHT_IRIS_CENTER]
+        eye_axis = right_iris - left_iris
+        axis_norm = float(np.linalg.norm(eye_axis))
+        if axis_norm < 1e-6:
+            return {"left": 0.0, "right": 0.0}
+
+        vertical_axis = np.array([-eye_axis[1], eye_axis[0]], dtype=float) / axis_norm
+
+        def normalized_gap(brow_indices, brow_weights, iris_idx, corners):
+            outer_i, inner_i = corners
+            eye_width = float(np.linalg.norm(
+                lms_smooth[inner_i] - lms_smooth[outer_i]))
+            if eye_width < 1e-6:
+                return 0.0
+            weighted_sum = 0.0
+            weight_total = 0.0
+            for brow_idx, weight in zip(brow_indices, brow_weights):
+                brow_to_iris = lms_smooth[brow_idx] - lms_smooth[iris_idx]
+                value = float(np.dot(brow_to_iris, vertical_axis) / eye_width)
+                weighted_sum += value * float(weight)
+                weight_total += float(weight)
+            if weight_total < 1e-6:
+                return 0.0
+            return float(weighted_sum / weight_total)
+
+        return {
+            "left": normalized_gap(
+                LEFT_BROW_IRIS_POINTS, LEFT_BROW_IRIS_WEIGHTS,
+                LEFT_IRIS_CENTER, LEFT_BROW_CORNERS),
+            "right": normalized_gap(
+                RIGHT_BROW_IRIS_POINTS, RIGHT_BROW_IRIS_WEIGHTS,
+                RIGHT_IRIS_CENTER, RIGHT_BROW_CORNERS),
+        }
+
+    @staticmethod
+    def _calc_eyebrow_metrics(lms_smooth):
+        """Calculate eyebrow slope and Brow-Iris Gap."""
         from eye_constants import (
             LEFT_BROW_POINTS, LEFT_BROW_CORNERS,
             RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS,
         )
+        left = EllSegDetector._calc_brow_geometry(
+            lms_smooth, LEFT_BROW_POINTS, LEFT_BROW_CORNERS)
+        right = EllSegDetector._calc_brow_geometry(
+            lms_smooth, RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS)
+        brow_iris_gaps = EllSegDetector._calc_brow_iris_gaps(lms_smooth)
         return {
-            "left": EllSegDetector._calc_ebhr(
-                lms_smooth, LEFT_BROW_POINTS, LEFT_BROW_CORNERS),
-            "right": EllSegDetector._calc_ebhr(
-                lms_smooth, RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS),
+            "left_slope": left["slope"],
+            "right_slope": right["slope"],
+            "slope_symmetry": abs(left["slope"] - right["slope"]),
+            "left_brow_iris_gap": brow_iris_gaps["left"],
+            "right_brow_iris_gap": brow_iris_gaps["right"],
         }
 
     def get_eyelid_signal(self, lms_smooth=None):
@@ -1107,7 +1626,9 @@ class EllSegDetector:
               left_ear, right_ear: 当前帧 EAR 值
               left_delta, right_delta: 与基线的偏差
                 (正值 = 比基线更开, 负值 = 比基线更闭)
+              eyelid_symmetry: 左右当前 EAR 高宽比差值
               left_qualified, right_qualified: 是否在容差范围内
+              symmetry_qualified: 左右当前 EAR 是否对称
         """
         if lms_smooth is None:
             # 尝试从 detect 内部获取 lms_smooth
@@ -1126,14 +1647,17 @@ class EllSegDetector:
 
         left_delta = ears["left"] - bl["left_ear"]
         right_delta = ears["right"] - bl["right_ear"]
+        eyelid_symmetry = abs(ears["left"] - ears["right"])
 
         return {
             "left_ear": ears["left"],
             "right_ear": ears["right"],
             "left_delta": left_delta,
             "right_delta": right_delta,
+            "eyelid_symmetry": eyelid_symmetry,
             "left_qualified": abs(left_delta) <= tol,
             "right_qualified": abs(right_delta) <= tol,
+            "symmetry_qualified": eyelid_symmetry <= tol,
         }
 
     def save_current_eyelid_baseline(self, lms_smooth=None):
@@ -1153,65 +1677,134 @@ class EllSegDetector:
         return True
 
     # ==================================================================
-    # 眉毛 EBHR 计算与信号
+    # Eyebrow BIG + slope signal.
     # ==================================================================
 
     def get_eyebrow_signal(self, lms_smooth=None):
         """
-        返回眉毛 EBHR 信号 — 对比基线 EBHR。
-
-        Args:
-            lms_smooth: 平滑后的关键点坐标。若为 None，从最近一次 detect 结果获取。
-
-        Returns:
-            dict 或 None:
-              left_ebhr, right_ebhr: 当前帧 EBHR 值
-              left_delta, right_delta: 与基线的偏差
-              left_qualified, right_qualified: 是否在容差范围内
+        Return eyebrow status using only BIG (Brow-Iris Gap) and slope.
+        BIG judges brow height against iris center; slope judges brow shape.
         """
         if lms_smooth is None:
             if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
                 return None
             lms_smooth = self._last_lms_smooth
 
-        if self.eyebrow_baseline is None:
+        metrics = self._calc_eyebrow_metrics(lms_smooth)
+        from eye_constants import (
+            EYEBROW_BIG_SYMMETRY_TOLERANCE,
+            EYEBROW_CUSTOM_BIG_TOLERANCE,
+            EYEBROW_CUSTOM_SLOPE_TOLERANCE,
+        )
+
+        bl = self.eyebrow_baseline
+        if not (
+            bl
+            and "left_brow_iris_gap" in bl
+            and "right_brow_iris_gap" in bl
+            and "left_slope" in bl
+            and "right_slope" in bl
+        ):
             return None
 
-        ebhrs = self._calc_ebhrs(lms_smooth)
-        bl = self.eyebrow_baseline
-        from eye_constants import EYEBROW_EBHR_TOLERANCE
-        tol = EYEBROW_EBHR_TOLERANCE
+        left_range = (
+            float(bl["left_brow_iris_gap"]) - EYEBROW_CUSTOM_BIG_TOLERANCE,
+            float(bl["left_brow_iris_gap"]) + EYEBROW_CUSTOM_BIG_TOLERANCE,
+        )
+        right_range = (
+            float(bl["right_brow_iris_gap"]) - EYEBROW_CUSTOM_BIG_TOLERANCE,
+            float(bl["right_brow_iris_gap"]) + EYEBROW_CUSTOM_BIG_TOLERANCE,
+        )
+        left_slope_range = (
+            float(bl["left_slope"]) - EYEBROW_CUSTOM_SLOPE_TOLERANCE,
+            float(bl["left_slope"]) + EYEBROW_CUSTOM_SLOPE_TOLERANCE,
+        )
+        right_slope_range = (
+            float(bl["right_slope"]) - EYEBROW_CUSTOM_SLOPE_TOLERANCE,
+            float(bl["right_slope"]) + EYEBROW_CUSTOM_SLOPE_TOLERANCE,
+        )
 
-        left_delta = ebhrs["left"] - bl["left_ebhr"]
-        right_delta = ebhrs["right"] - bl["right_ebhr"]
+        def range_delta(value, value_range):
+            lo, hi = value_range
+            if value < lo:
+                return value - lo
+            if value > hi:
+                return value - hi
+            return 0.0
+
+        left_big = metrics["left_brow_iris_gap"]
+        right_big = metrics["right_brow_iris_gap"]
+        left_position_delta = range_delta(left_big, left_range)
+        right_position_delta = range_delta(right_big, right_range)
+        left_position_ok = left_position_delta == 0.0
+        right_position_ok = right_position_delta == 0.0
+
+        left_slope = metrics["left_slope"]
+        right_slope = metrics["right_slope"]
+        left_slope_range_ok = left_slope_range[0] <= left_slope <= left_slope_range[1]
+        right_slope_range_ok = right_slope_range[0] <= right_slope <= right_slope_range[1]
+        slope_range_ok = left_slope_range_ok and right_slope_range_ok
+
+        big_symmetry = abs(left_big - right_big)
+        big_symmetry_ok = big_symmetry <= EYEBROW_BIG_SYMMETRY_TOLERANCE
+        left_side_ok = left_position_ok and left_slope_range_ok
+        right_side_ok = right_position_ok and right_slope_range_ok
 
         return {
-            "left_ebhr": ebhrs["left"],
-            "right_ebhr": ebhrs["right"],
-            "left_delta": left_delta,
-            "right_delta": right_delta,
-            "left_qualified": abs(left_delta) <= tol,
-            "right_qualified": abs(right_delta) <= tol,
+            "left_slope": left_slope,
+            "right_slope": right_slope,
+            "slope_symmetry": metrics["slope_symmetry"],
+            "left_brow_iris_gap": left_big,
+            "right_brow_iris_gap": right_big,
+            "left_position": left_big,
+            "right_position": right_big,
+            "left_position_target": (left_range[0] + left_range[1]) / 2.0,
+            "right_position_target": (right_range[0] + right_range[1]) / 2.0,
+            "left_position_min": left_range[0],
+            "left_position_max": left_range[1],
+            "right_position_min": right_range[0],
+            "right_position_max": right_range[1],
+            "left_position_delta": left_position_delta,
+            "right_position_delta": right_position_delta,
+            "big_symmetry": big_symmetry,
+            "big_symmetry_ok": big_symmetry_ok,
+            "big_symmetry_tolerance": EYEBROW_BIG_SYMMETRY_TOLERANCE,
+            "left_slope_min": left_slope_range[0],
+            "left_slope_max": left_slope_range[1],
+            "right_slope_min": right_slope_range[0],
+            "right_slope_max": right_slope_range[1],
+            "left_slope_range_qualified": left_slope_range_ok,
+            "right_slope_range_qualified": right_slope_range_ok,
+            "slope_range_qualified": slope_range_ok,
+            "left_qualified": left_side_ok,
+            "right_qualified": right_side_ok,
+            "symmetry_qualified": big_symmetry_ok,
+            "qualified": left_side_ok and right_side_ok and big_symmetry_ok,
+            "baseline": bl,
         }
 
     def save_current_eyebrow_baseline(self, lms_smooth=None):
-        """手动保存当前帧的 EBHR 值为眉毛基线"""
+        """Save the current BIG and slope as the custom eyebrow baseline."""
         if lms_smooth is None:
             if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
                 print("[Eyebrow Baseline] Cannot save: no landmark data")
                 return False
             lms_smooth = self._last_lms_smooth
 
-        ebhrs = self._calc_ebhrs(lms_smooth)
+        metrics = self._calc_eyebrow_metrics(lms_smooth)
         self.eyebrow_baseline = {
-            "left_ebhr": ebhrs["left"],
-            "right_ebhr": ebhrs["right"],
+            "left_slope": metrics["left_slope"],
+            "right_slope": metrics["right_slope"],
+            "slope_symmetry": metrics["slope_symmetry"],
+            "left_brow_iris_gap": metrics["left_brow_iris_gap"],
+            "right_brow_iris_gap": metrics["right_brow_iris_gap"],
+            "has_brow_iris_gap": True,
         }
-        save_eyebrow_baseline(left_ebhr=ebhrs["left"], right_ebhr=ebhrs["right"])
+        save_eyebrow_baseline(metrics=metrics)
         return True
 
     # ==================================================================
-    # 上唇 ULR 计算与信号 — A16
+    # Upper Lip ULR 计算与信号 — A16
     # ==================================================================
 
     @staticmethod
@@ -1286,6 +1879,206 @@ class EllSegDetector:
         ulr = self._calc_ulr(lms_smooth)
         self.upper_lip_baseline = {"ulr": ulr}
         save_upper_lip_baseline(ulr=ulr)
+        return True
+
+    # ==================================================================
+    # 头部定位信号 — 鼻尖+眼线
+    # ==================================================================
+
+    def get_head_signal(self, lms_smooth=None):
+        """
+        返回头部定位检查信号 — 基于鼻尖基线 + 眼线基准。
+
+        返回 dict:
+            nose_dx, nose_dy:   鼻尖像素偏移 (当前-基线)
+            nose_dist:          鼻尖欧氏偏移距离 (px)
+            tilt_deg:           眼线倾斜角 (度), 正值=顺时针
+            symmetry:           左右眼到鼻尖距离比 (1.0=完美对称)
+            nose_ok, tilt_ok, symmetry_ok: 单项合格标志
+            all_ok:             全部合格
+        """
+        if self.head_position_baseline is None:
+            return None
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        from eye_constants import (
+            HEAD_NOSE_IDX, HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX,
+            HEAD_NOSE_DX_TOLERANCE, HEAD_NOSE_DY_TOLERANCE,
+            HEAD_TILT_TOLERANCE, HEAD_SYMMETRY_TOLERANCE,
+        )
+        bl = self.head_position_baseline
+
+        # --- 鼻尖偏移 ---
+        nose_cur = lms_smooth[HEAD_NOSE_IDX]
+        nose_dx = nose_cur[0] - bl["nose_px"][0]
+        nose_dy = nose_cur[1] - bl["nose_px"][1]
+        nose_dist = np.sqrt(nose_dx**2 + nose_dy**2)
+        nose_ok = abs(nose_dx) <= HEAD_NOSE_DX_TOLERANCE and abs(nose_dy) <= HEAD_NOSE_DY_TOLERANCE
+
+        # --- 眼线倾斜角 ---
+        eye_L_cur = lms_smooth[HEAD_EYE_LEFT_IDX]
+        eye_R_cur = lms_smooth[HEAD_EYE_RIGHT_IDX]
+        eye_L_bl = np.array(bl["eye_left"], dtype=np.float64)
+        eye_R_bl = np.array(bl["eye_right"], dtype=np.float64)
+
+        # 基线眼线角度
+        bl_vec = eye_R_bl - eye_L_bl
+        bl_angle = np.degrees(np.arctan2(bl_vec[1], bl_vec[0]))
+        # 当前眼线角度
+        cur_vec = np.array([eye_R_cur[0] - eye_L_cur[0],
+                            eye_R_cur[1] - eye_L_cur[1]], dtype=np.float64)
+        cur_angle = np.degrees(np.arctan2(cur_vec[1], cur_vec[0]))
+        # 眼线倾斜: 正值=顺时针 (相对于基线)
+        tilt_deg = cur_angle - bl_angle
+        # 归一化到 (-180, 180]
+        if tilt_deg > 180:
+            tilt_deg -= 360
+        elif tilt_deg <= -180:
+            tilt_deg += 360
+        tilt_ok = abs(tilt_deg) <= HEAD_TILT_TOLERANCE
+
+        # --- 左右对称 ---
+        dist_L = np.linalg.norm(np.array([eye_L_cur[0] - nose_cur[0],
+                                          eye_L_cur[1] - nose_cur[1]]))
+        dist_R = np.linalg.norm(np.array([eye_R_cur[0] - nose_cur[0],
+                                          eye_R_cur[1] - nose_cur[1]]))
+        if dist_R > 0.5:
+            symmetry = dist_L / dist_R
+        else:
+            symmetry = 0.0
+        symmetry_ok = abs(1.0 - symmetry) <= HEAD_SYMMETRY_TOLERANCE
+
+        return {
+            "nose_dx": float(nose_dx),
+            "nose_dy": float(nose_dy),
+            "nose_dist": float(nose_dist),
+            "tilt_deg": float(tilt_deg),
+            "symmetry": float(symmetry),
+            "nose_ok": nose_ok,
+            "tilt_ok": tilt_ok,
+            "symmetry_ok": symmetry_ok,
+            "all_ok": nose_ok and tilt_ok and symmetry_ok,
+        }
+
+    def save_current_head_position_baseline(self, lms_smooth=None, n_frames=60, trim=20):
+        """多帧采集取中位 → 保存头部位置基线 (抗抖动)。
+
+        Args:
+            n_frames: 采集帧数 (默认 60)
+            trim:     去掉最大/最小帧数 (默认 20)
+        """
+        from eye_constants import (
+            HEAD_NOSE_IDX, HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX,
+        )
+
+        if lms_smooth is not None:
+            # 单帧快捷路径 (用于一键保存全部基线 [A])
+            nose = (int(lms_smooth[HEAD_NOSE_IDX, 0]), int(lms_smooth[HEAD_NOSE_IDX, 1]))
+            eye_l = (int(lms_smooth[HEAD_EYE_LEFT_IDX, 0]), int(lms_smooth[HEAD_EYE_LEFT_IDX, 1]))
+            eye_r = (int(lms_smooth[HEAD_EYE_RIGHT_IDX, 0]), int(lms_smooth[HEAD_EYE_RIGHT_IDX, 1]))
+            self.head_position_baseline = {
+                "nose_px": nose,
+                "eye_left": eye_l,
+                "eye_right": eye_r,
+                "frame_width": self.width,
+                "frame_height": self.height,
+                "eye_distance": round(float(np.linalg.norm(
+                    np.array(eye_r, dtype=np.float64) - np.array(eye_l, dtype=np.float64))), 1),
+            }
+            save_head_position_baseline(
+                nose_px=nose, eye_left_px=eye_l, eye_right_px=eye_r,
+                frame_width=self.width, frame_height=self.height,
+            )
+            return True
+
+        # ---- 多帧采集抗抖动路径 ----
+        if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+            print("[HeadPosition Baseline] Cannot save: no landmark data")
+            return False
+
+        mp_was_on = self.enable_mp
+        self.enable_mp = True
+        self.enable_ellseg = False
+
+        frames_data = []  # [(nose, eye_l, eye_r), ...]
+        collected = 0
+        no_face_count = 0
+
+        print(f"[HeadPosition Baseline] 采集 {n_frames} 帧 (trim={trim})...")
+        while collected < n_frames:
+            ok, frame = self.capture()
+            if not ok:
+                time.sleep(0.001)
+                continue
+
+            self.detect(frame)
+            lms = self._last_lms_smooth
+            if lms is None:
+                no_face_count += 1
+                if no_face_count > 10:
+                    break
+                time.sleep(0.001)
+                continue
+            no_face_count = 0
+
+            nose_px = (int(lms[HEAD_NOSE_IDX, 0]), int(lms[HEAD_NOSE_IDX, 1]))
+            left_px = (int(lms[HEAD_EYE_LEFT_IDX, 0]), int(lms[HEAD_EYE_LEFT_IDX, 1]))
+            right_px = (int(lms[HEAD_EYE_RIGHT_IDX, 0]), int(lms[HEAD_EYE_RIGHT_IDX, 1]))
+            frames_data.append((nose_px, left_px, right_px))
+            collected += 1
+
+        self.enable_mp = mp_was_on
+
+        if len(frames_data) < 2 * trim + 1:
+            print(f"[HeadPosition Baseline] 有效帧不足: {len(frames_data)}, 需要 >= {2*trim+1}")
+            return False
+
+        # 计算均值
+        noses = np.array([f[0] for f in frames_data], dtype=np.float64)
+        lefts = np.array([f[1] for f in frames_data], dtype=np.float64)
+        rights = np.array([f[2] for f in frames_data], dtype=np.float64)
+        mean_n = noses.mean(axis=0)
+        mean_l = lefts.mean(axis=0)
+        mean_r = rights.mean(axis=0)
+
+        # 按偏离排序
+        devs = []
+        for i, (n, l, r) in enumerate(frames_data):
+            d = np.linalg.norm(np.array(n) - mean_n) \
+              + np.linalg.norm(np.array(l) - mean_l) \
+              + np.linalg.norm(np.array(r) - mean_r)
+            devs.append((d, i))
+        devs.sort(key=lambda x: x[0])
+
+        # 修剪取中位数
+        trimmed_indices = [idx for _, idx in devs[trim:-trim]]
+        median_idx = trimmed_indices[len(trimmed_indices) // 2]
+        nose_px, left_px, right_px = frames_data[median_idx]
+
+        eye_dist = round(float(np.linalg.norm(
+            np.array(right_px, dtype=np.float64) - np.array(left_px, dtype=np.float64))), 1)
+
+        self.head_position_baseline = {
+            "nose_px": nose_px,
+            "eye_left": left_px,
+            "eye_right": right_px,
+            "frame_width": self.width,
+            "frame_height": self.height,
+            "eye_distance": eye_dist,
+        }
+        save_head_position_baseline(
+            nose_px=nose_px, eye_left_px=left_px, eye_right_px=right_px,
+            frame_width=self.width, frame_height=self.height,
+        )
+
+        all_d = [d for d, _ in devs]
+        med_d = all_d[len(all_d) // 2]
+        print(f"  [HeadPosition Baseline] {len(frames_data)}帧→trim{trim}→ "
+              f"中位={nose_px}/{left_px}/{right_px} eye_dist={eye_dist:.1f} "
+              f"(偏差: min={all_d[0]:.1f} med={med_d:.1f} max={all_d[-1]:.1f})")
         return True
 
     # ==================================================================
@@ -1597,6 +2390,41 @@ class EllSegDetector:
         save_lower_lip_baseline(llr=llr)
         return True
 
+    def adjust_baseline_by_vertical_offset(self, det=None):
+        """用当前帧的参考线垂直偏移，永久平移基线所有Y坐标并保存"""
+        if det is None:
+            det = self.last_result
+        if det is None or not self.baseline:
+            print("[V-Offset] No baseline or detection available")
+            return False
+        bl = self.baseline
+        bl_eye_line = bl.get("eye_line_y")
+        if bl_eye_line is None:
+            print("[V-Offset] Baseline has no eye_line_y, re-save baseline (S) first")
+            return False
+        li = det.get("left_iris")
+        ri = det.get("right_iris")
+        if li is None or ri is None:
+            print("[V-Offset] No iris detected, cannot calculate offset")
+            return False
+        cur_line = (li[1] + ri[1]) / 2.0
+        dy = cur_line - bl_eye_line
+        print(f"[V-Offset] Vertical offset: {dy:+.2f} px")
+
+        # 平移基线所有Y坐标
+        self.baseline["nose"] = (self.baseline["nose"][0], self.baseline["nose"][1] + dy)
+        self.baseline["iris_left"] = (self.baseline["iris_left"][0], self.baseline["iris_left"][1] + dy)
+        self.baseline["iris_right"] = (self.baseline["iris_right"][0], self.baseline["iris_right"][1] + dy)
+        self.baseline["eye_line_y"] = cur_line
+
+        save_baseline(
+            nose_pos=self.baseline["nose"],
+            left_iris_pos=self.baseline["iris_left"],
+            right_iris_pos=self.baseline["iris_right"],
+        )
+        print(f"[V-Offset] Baseline adjusted and saved. New eye_line_y={cur_line:.2f}")
+        return True
+
     def close(self):
         self.stop_display()
         if hasattr(self, 'landmarker') and self.landmarker:
@@ -1615,7 +2443,7 @@ if __name__ == "__main__":
 
     detector = EllSegDetector()
     detector.start_display()
-    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [M] Save mouth  [L] Save lower lip  [U] Save upper lip  [C] Save mouth corners  [A] Save ALL  [1] Toggle MP  [2] Toggle EllSeg  [3] Toggle Landmarks  [Q] Quit")
+    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [M] Save mouth  [L] Save lower lip  [U] Save upper lip  [C] Save mouth corners  [D] Save head position  [V] Adjust baseline by eyeLine  [A] Save ALL  [G] Toggle baseline overlay  [Y] Toggle eyeLine HUD  [1] Toggle MP  [2] Toggle EllSeg  [3] Toggle Landmarks  [Q] Quit")
 
     if raw_test:
         print("\n[Raw FPS Test] 仅测量摄像头原始读取帧率 (跳过 MediaPipe + EllSeg)...")
@@ -1665,6 +2493,14 @@ if __name__ == "__main__":
             if last in (ord('c'), ord('C')):
                 detector.save_current_mouth_corners_baseline()
                 detector._last_key = None
+            # 检测 D 键保存头部定位基线
+            if last in (ord('d'), ord('D')):
+                detector.save_current_head_position_baseline()
+                detector._last_key = None
+            # 检测 V 键：用参考线垂直偏移永久调整基线
+            if last in (ord('v'), ord('V')):
+                detector.adjust_baseline_by_vertical_offset()
+                detector._last_key = None
             # 检测 A 键一键保存全部基线
             if last in (ord('a'), ord('A')):
                 print("\n=== 一键保存全部基线 ===")
@@ -1675,6 +2511,7 @@ if __name__ == "__main__":
                 detector.save_current_lower_lip_baseline()
                 detector.save_current_upper_lip_baseline()
                 detector.save_current_mouth_corners_baseline()
+                detector.save_current_head_position_baseline()
                 print("=== 全部基线保存完成 ===\n")
                 detector._last_key = None
 

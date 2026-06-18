@@ -24,7 +24,7 @@ EYEBROW_NAMES = ["A0", "A1"]
 # ============================================================
 # 眼球偏移容差（像素）
 # ============================================================
-EYEBALL_OFFSET_TOLERANCE = 2   # 虹膜偏移合格阈值 (px)
+EYEBALL_OFFSET_TOLERANCE = 1.0   # 虹膜偏移合格阈值 (px)
 
 # ============================================================
 # 眼皮 EAR (Eye Aspect Ratio) 参数
@@ -43,17 +43,14 @@ RIGHT_EYE_CORNERS = (362, 263)
 # 眼皮自动调整参数
 EYELID_WAIT_SECONDS = 1.0      # 每次调整后等待秒数
 EYELID_MAX_ITERATIONS = 30     # 最大调整轮次
-
-# ============================================================
-# 眉毛 EBHR (Eyebrow Height Ratio) 参数
-# ============================================================
-EYEBROW_BASELINE_FILE = "eyebrow_baseline.json"
-EYEBROW_EBHR_TOLERANCE = 0.01          # EBHR 偏差容差
+EYEBROW_BIG_SYMMETRY_TOLERANCE = 0.005 # 眉毛对称容差（大范围，±2%）
+EYEBROW_CUSTOM_BIG_TOLERANCE = 0.01 # 眉毛高低评分大范围容差（±1%）
+EYEBROW_CUSTOM_SLOPE_TOLERANCE = 0.03   # 眉毛斜率容差（±3%）
 EYEBROW_WAIT_SECONDS = 1.0             # 每次调整后等待秒数
 EYEBROW_MAX_ITERATIONS = 30            # 最大调整轮次
 
-# EBHR 计算用关键点 (MediaPipe 478 关键点索引)
-# 左眉: 眉弓上缘8个关键点 (更稳健)
+# ---- slope 计算用关键点 (眉弓上缘，骨头不动，适合斜率) ----
+# 左眉: 眉弓上缘8个关键点
 LEFT_BROW_POINTS = [52, 53, 55, 63, 65, 66, 105, 107]
 LEFT_BROW_CORNERS = (33, 133)          # (外眼角, 内眼角)
 # 右眉: 眉弓上缘8个关键点
@@ -63,6 +60,14 @@ RIGHT_BROW_CORNERS = (362, 263)
 # ============================================================
 # 嘴部 MAR (Mouth Aspect Ratio) 参数 — A26 下巴
 # ============================================================
+# Brow-Iris Gap: eyebrow position relative to the calibrated iris center.
+LEFT_BROW_IRIS_POINTS = [52, 55, 65]
+RIGHT_BROW_IRIS_POINTS = [282, 285, 295]
+LEFT_BROW_IRIS_WEIGHTS = [0.2, 0.6, 0.2]
+RIGHT_BROW_IRIS_WEIGHTS = [0.2, 0.6, 0.2]
+LEFT_IRIS_CENTER = 468
+RIGHT_IRIS_CENTER = 473
+
 MOUTH_BASELINE_FILE = "mouth_baseline.json"
 MOUTH_MAR_TOLERANCE = 0.015          # MAR 偏差容差
 MOUTH_WAIT_SECONDS = 1.0
@@ -128,6 +133,20 @@ MOUTH_CORNER_MAX_ITERATIONS = 30
 # A22=右嘴角水平(前→后), A23=左嘴角垂直(上→下), A24=左嘴角水平(前→后), A25=右嘴角垂直(上→下)
 MOUTH_CORNER_H_CHANNELS = [24, 22]     # [左水平A24, 右水平A22]
 MOUTH_CORNER_V_CHANNELS = [23, 25]     # [左垂直A23, 右垂直A25]
+
+# ============================================================
+# 头部定位基线参数 — 鼻尖+眼线检查
+# ============================================================
+HEAD_POSITION_BASELINE_FILE = "head_position_baseline.json"
+HEAD_NOSE_DX_TOLERANCE = 3.0   # 鼻尖水平偏移容差 (px)
+HEAD_NOSE_DY_TOLERANCE = 3.0   # 鼻尖垂直偏移容差 (px)
+HEAD_TILT_TOLERANCE = 2.0      # 头部倾斜容差 (度)
+HEAD_SYMMETRY_TOLERANCE = 0.05 # 对称比例容差 (±5%)
+
+# 计算用关键点 (MediaPipe 478)
+HEAD_NOSE_IDX = 1             # 鼻尖
+HEAD_EYE_LEFT_IDX = 33        # 左眼外角
+HEAD_EYE_RIGHT_IDX = 263      # 右眼外角
 
 # ============================================================
 # 摄像头配置

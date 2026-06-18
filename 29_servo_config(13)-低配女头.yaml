@@ -7,14 +7,14 @@ SERVO_INFO:
     channel_idx: 0
     start_deg: 95
     end_deg: 200
-    temp_deg: 135
+    temp_deg: 171
     coefficient: 1
   A1:
     info: R_eyebrow_head_ver 右眉头 上——下
     channel_idx: 1
     start_deg: 170
     end_deg: 60
-    temp_deg: 135
+    temp_deg: 88
     coefficient: 1
   A2:
     info: L_eyebrow_head_hor 左眉头 外——内
@@ -63,28 +63,28 @@ SERVO_INFO:
     channel_idx: 8
     start_deg: 215
     end_deg: 125
-    temp_deg: 155
+    temp_deg: 135
     coefficient: 1
   A9:
     info: R_eyelid 右眼皮 开——合
     channel_idx: 9
     start_deg: 50
     end_deg: 145
-    temp_deg: 115
+    temp_deg: 135
     coefficient: 1
   A10:
     info: L_vertical_eyeball 左眼球 上——下
     channel_idx: 10
     start_deg: 114
     end_deg: 45
-    temp_deg: 73
+    temp_deg: 45
     coefficient: 1
   A11:
     info: R_vertical_eyeball 右眼球 上——下
     channel_idx: 11
     start_deg: 220
     end_deg: 170
-    temp_deg: 205
+    temp_deg: 216
     coefficient: 1
   A12:
     info: L_horizontal_eyeball 左眼球 内——外

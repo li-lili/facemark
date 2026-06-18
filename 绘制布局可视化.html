@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>绘制布局可视化</title>
+  <style>
+    body {
+      margin: 0;
+      background: #0b0e13;
+      color: #e6edf3;
+      font-family: Consolas, "Microsoft YaHei", monospace;
+    }
+    header {
+      padding: 14px 18px;
+      border-bottom: 1px solid #29313b;
+      background: #111720;
+      position: sticky;
+      top: 0;
+    }
+    main {
+      padding: 16px;
+    }
+    .frame {
+      width: min(100%, 1920px);
+      overflow: auto;
+      border: 1px solid #29313b;
+      background: #101318;
+    }
+    img {
+      display: block;
+      width: 1920px;
+      height: 1080px;
+    }
+    .hint {
+      color: #aeb8c5;
+      font-size: 14px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>当前 HUD 绘制布局可视化</div>
+    <div class="hint">按真实 1920x1080 坐标绘制；浏览器可缩放，横向滚动可看完整画面。</div>
+  </header>
+  <main>
+    <div class="frame">
+      <img src="绘制布局可视化.svg" alt="当前绘制布局可视化">
+    </div>
+  </main>
+</body>
+</html>
