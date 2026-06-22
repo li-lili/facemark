@@ -98,9 +98,15 @@ def main():
         sys.exit(1)
 
     current_idx = min(caps.keys())
+    flipped_h = {}  # 水平反转
+    flipped_v = {}  # 垂直反转
+    for idx in caps:
+        flipped_h[idx] = False
+        flipped_v[idx] = False
+
     print(f"\n当前: Camera {current_idx}")
     print("按键: [Q]退出  [1/2/3...]切换  [S]截图  [F]全屏  [R]分辨率")
-    print("      [A]自动曝光开关  [+/-]曝光  [[/]]增益")
+    print("      [A]自动曝光开关  [+/-]曝光  [[/]]增益  [H]水平  [V]垂直")
 
     win_name = "Camera Test"
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
@@ -115,9 +121,24 @@ def main():
         h, w = frame.shape[:2]
         ae_mode, exp, gain, bri, con = get_exp_status(cap)
 
+        # 反转: 水平(1) 垂直(0) 两者(-1)
+        if flipped_h[current_idx] and flipped_v[current_idx]:
+            frame = cv2.flip(frame, -1)  # 同时翻转
+        elif flipped_h[current_idx]:
+            frame = cv2.flip(frame, 1)   # 水平
+        elif flipped_v[current_idx]:
+            frame = cv2.flip(frame, 0)   # 垂直
+
         # 叠加信息
+        flip_label = ""
+        if flipped_h[current_idx] and flipped_v[current_idx]:
+            flip_label = " [HV]"
+        elif flipped_h[current_idx]:
+            flip_label = " [H]"
+        elif flipped_v[current_idx]:
+            flip_label = " [V]"
         info_lines = [
-            f"Camera {current_idx}  {w}x{h}",
+            f"Camera {current_idx}  {w}x{h}{flip_label}",
             f"FPS: {cap.get(cv2.CAP_PROP_FPS):.1f}",
             f"Exp: {ae_mode} ({exp:.0f})  Gain: {gain:.0f}",
         ]
@@ -157,6 +178,12 @@ def main():
                 else:
                     print(f"  {tw}x{th}  -  (实际: {rw}x{rh})")
             print()
+        elif key == ord('h'):
+            flipped_h[current_idx] = not flipped_h[current_idx]
+            print(f"  Camera {current_idx} H-flip: {'ON' if flipped_h[current_idx] else 'OFF'}")
+        elif key == ord('v'):
+            flipped_v[current_idx] = not flipped_v[current_idx]
+            print(f"  Camera {current_idx} V-flip: {'ON' if flipped_v[current_idx] else 'OFF'}")
         elif key == ord('a'):
             # 切换自动/手动曝光
             ae, _, _, _, _ = get_exp_status(cap)

@@ -119,14 +119,14 @@ SERVO_INFO:
     channel_idx: 16
     start_deg: 100
     end_deg: 190
-    temp_deg: 154
+    temp_deg: 120
     coefficient: 1
   A17:
     info: mid_upper_lip_hor 中上嘴唇 前——后
     channel_idx: 17
     start_deg: 200
     end_deg: 165
-    temp_deg: 200
+    temp_deg: 175
     coefficient: 1
   A18:
     info: mid_lower_lip_hor 中下嘴唇 前——后

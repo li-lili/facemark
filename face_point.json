@@ -3,31 +3,31 @@
   "active_template": "default",
   "common": {
     "nose": [
-      964,
-      483
+      957,
+      476
     ],
     "iris_left": [
-      878,
-      379
+      847,
+      344
     ],
     "iris_right": [
-      1043,
-      379
+      1082,
+      339
     ],
-    "eye_line_y": 379.0
+    "eye_line_y": 341.5
   },
   "templates": {
     "default": {
       "eyelid": {
-        "left_ear": 0.403172546195463,
-        "right_ear": 0.39818962822605247
+        "left_ear": 0.4059316846303716,
+        "right_ear": 0.3961917756432375
       },
       "eyebrow": {
-        "left_slope": -0.27423777953904604,
-        "right_slope": 0.2927246168319237,
-        "slope_symmetry": 0.5669623963709698,
-        "left_brow_iris_gap": -0.5141723069488926,
-        "right_brow_iris_gap": -0.5263343543666508
+        "left_slope": -0.22766006156777235,
+        "right_slope": 0.2887563454747329,
+        "slope_symmetry": 0.5164164070425052,
+        "left_brow_iris_gap": -0.6077624789993593,
+        "right_brow_iris_gap": -0.5889067252834415
       },
       "mouth": {
         "mar": 0.7139032236631749
@@ -36,7 +36,17 @@
         "llr": 0.12608930100464993
       },
       "upper_lip": {
-        "ulr": 1.1786565450358601
+        "ulr": 1.1720055198326595,
+        "side_upper_tip": [
+          1219,
+          648
+        ],
+        "side_roi": [
+          1116,
+          632,
+          1292,
+          734
+        ]
       },
       "mouth_corners": {
         "nose": [

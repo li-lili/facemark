@@ -19,11 +19,13 @@ Eye Auto Tuner — 眼睛舵机调整工具 (主入口)
 import os
 import time
 import json
+import cv2
 from typing import List, Tuple
 
 from Motor import FaceController
 from Communication import UARTDevice
 from utility import read_yaml
+from lip_front_detector import find_lip_front_points
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
     EYEBALL_CHANNELS, EYELID_CHANNELS,     EYEBROW_CHANNELS, EYEBROW_NAMES,
@@ -37,17 +39,27 @@ from eye_constants import (
     MOUTH_CHIN_CHANNEL,
     LOWER_LIP_LLR_TOLERANCE,
     LOWER_LIP_WAIT_SECONDS, LOWER_LIP_MAX_ITERATIONS,
-    LOWER_LIP_CHANNEL,
+    LOWER_LIP_CHANNEL, LOWER_LIP_SIDE_CHANNEL,
+    LOWER_LIP_SIDE_CAMERA_INDEX, LOWER_LIP_SIDE_ROI,
+    LOWER_LIP_SIDE_FACE_DIRECTION, LOWER_LIP_SIDE_FLIP_VERTICAL, LOWER_LIP_SIDE_X_TOLERANCE,
+    LOWER_LIP_SIDE_Y_TOLERANCE, LOWER_LIP_SIDE_SCORE_PCT,
+    LOWER_LIP_SIDE_A_DELTA, LOWER_LIP_SIDE_MIN_SAT,
+    LOWER_LIP_SIDE_SPLIT_PCT, LOWER_LIP_SIDE_MIN_AREA,
     UPPER_LIP_ULR_TOLERANCE,
     UPPER_LIP_WAIT_SECONDS, UPPER_LIP_MAX_ITERATIONS,
-    UPPER_LIP_CHANNEL,
+    UPPER_LIP_CHANNEL, UPPER_LIP_SIDE_CHANNEL,
+    UPPER_LIP_SIDE_CAMERA_INDEX, UPPER_LIP_SIDE_ROI,
+    UPPER_LIP_SIDE_FACE_DIRECTION, UPPER_LIP_SIDE_FLIP_VERTICAL, UPPER_LIP_SIDE_X_TOLERANCE,
+    UPPER_LIP_SIDE_Y_TOLERANCE, UPPER_LIP_SIDE_SCORE_PCT,
+    UPPER_LIP_SIDE_A_DELTA, UPPER_LIP_SIDE_MIN_SAT,
+    UPPER_LIP_SIDE_SPLIT_PCT, UPPER_LIP_SIDE_MIN_AREA,
     MOUTH_CORNER_TOLERANCE,
     MOUTH_CORNER_Y_TOLERANCE,
     MOUTH_CORNER_WAIT_SECONDS, MOUTH_CORNER_MAX_ITERATIONS,
     MOUTH_CORNER_H_CHANNELS, MOUTH_CORNER_V_CHANNELS,
     TuningResult,
 )
-from ellseg_scorer import EllSegDetector, TOLERANCE
+from ellseg_scorer import EllSegDetector, TOLERANCE, save_lower_lip_baseline, save_upper_lip_baseline
 
 # 眼球舵机名称 (A10-A13)
 EYEBALL_NAMES = [f"A{ch}" for ch in EYEBALL_CHANNELS]
@@ -82,6 +94,7 @@ class EyeAutoTuner:
         self.controller = None
         self.scorer = None
         self.angle_ranges = [(DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX)] * len(EYE_SERVO_CHANNELS)
+        self.side_cap = None
 
     # ------------------------------------------------------------------
     # 安全读取 list_temp_deg (list 没有 .get 方法)
@@ -180,6 +193,295 @@ class EyeAutoTuner:
         return self.scorer.capture_and_score(
             stabilize_frames=self.stabilize_frames,
         )
+
+    def _angle_range(self, channel: int) -> Tuple[int, int]:
+        start = self.controller.list_start_deg[channel]
+        end = self.controller.list_end_deg[channel]
+        return min(start, end), max(start, end)
+
+    def _ensure_side_cap(self):
+        if self.side_cap is not None and self.side_cap.isOpened():
+            return self.side_cap
+        cap = cv2.VideoCapture(UPPER_LIP_SIDE_CAMERA_INDEX, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            print(f"[UpperLip Side] Cannot open camera {UPPER_LIP_SIDE_CAMERA_INDEX}")
+            return None
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.side_cap = cap
+        print(f"[UpperLip Side] Camera {UPPER_LIP_SIDE_CAMERA_INDEX} opened")
+        return self.side_cap
+
+    def collect_upper_lip_side_samples(self, n_frames: int = 30, trim: int = 5):
+        cap = self._ensure_side_cap()
+        if cap is None:
+            return None
+
+        bl = self.scorer.upper_lip_baseline or {}
+        roi = bl.get("side_roi", UPPER_LIP_SIDE_ROI)
+        side_window = f"Side Camera {UPPER_LIP_SIDE_CAMERA_INDEX} - Upper Lip"
+        samples = []
+        collected = 0
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+            ok, frame = cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            if UPPER_LIP_SIDE_FLIP_VERTICAL:
+                frame = cv2.flip(frame, 0)
+            result = find_lip_front_points(
+                frame,
+                tuple(roi),
+                score_pct=UPPER_LIP_SIDE_SCORE_PCT,
+                a_delta=UPPER_LIP_SIDE_A_DELTA,
+                min_sat=UPPER_LIP_SIDE_MIN_SAT,
+                split_pct=UPPER_LIP_SIDE_SPLIT_PCT,
+                min_area=UPPER_LIP_SIDE_MIN_AREA,
+                face_direction=UPPER_LIP_SIDE_FACE_DIRECTION,
+            )
+            tip = result["upper"]
+            self._draw_upper_lip_side_sample_hud(frame, roi, tip, bl)
+            cv2.imshow(side_window, frame)
+            self._pump_cv_events()
+            if tip is None:
+                time.sleep(0.005)
+                continue
+            samples.append(tip)
+            collected += 1
+            self.scorer.update_hud([
+                (f"UpperLip Side Sampling: {collected}/{n_frames}", (10, 136), (200, 200, 200)),
+            ])
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [UpperLip Side] valid samples not enough: {len(samples)}, need >= {2*trim+1}")
+            return None
+
+        xs = sorted(p[0] for p in samples)[trim:-trim]
+        ys = sorted(p[1] for p in samples)[trim:-trim]
+        tip = (sum(xs) / len(xs), sum(ys) / len(ys))
+        ref = bl.get("side_upper_tip")
+        out = {
+            "tip": tip,
+            "roi": list(roi),
+            "qualified": False,
+        }
+        if ref is not None:
+            dx = tip[0] - float(ref[0])
+            dy = tip[1] - float(ref[1])
+            out.update({
+                "ref": ref,
+                "dx": dx,
+                "dy": dy,
+                "qualified": abs(dx) <= UPPER_LIP_SIDE_X_TOLERANCE and abs(dy) <= UPPER_LIP_SIDE_Y_TOLERANCE,
+            })
+        print(f"  [UpperLip Side] tip=({tip[0]:.1f},{tip[1]:.1f}) roi={roi}")
+        return out
+
+    def _draw_upper_lip_side_sample_hud(self, frame, roi, tip, baseline):
+        x1, y1, x2, y2 = [int(v) for v in roi]
+        self._draw_hud_panel(frame, (6, 8), (620, 176))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 80, 255), 2)
+        cv2.putText(frame, f"Side cam {UPPER_LIP_SIDE_CAMERA_INDEX} UpperLip ROI",
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"ROI=[{x1},{y1},{x2},{y2}]  Dir={UPPER_LIP_SIDE_FACE_DIRECTION}  VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL}",
+                    (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Tol: X<={UPPER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={UPPER_LIP_SIDE_Y_TOLERANCE:.1f}px",
+                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
+        if tip is not None:
+            cv2.circle(frame, tip, 7, (0, 0, 255), -1)
+            cv2.circle(frame, tip, 12, (255, 255, 255), 2)
+            cv2.putText(frame, f"Upper tip: x={tip[0]} y={tip[1]}",
+                        (10, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, "Upper tip: not found",
+                        (10, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1, cv2.LINE_AA)
+        if isinstance(baseline, dict) and baseline.get("side_upper_tip") is not None:
+            ref = [int(v) for v in baseline["side_upper_tip"]]
+            cv2.circle(frame, tuple(ref), 6, (0, 255, 255), -1)
+            cv2.putText(frame, f"Ref: x={ref[0]} y={ref[1]}",
+                        (10, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+            if tip is not None:
+                dx = tip[0] - ref[0]
+                dy = tip[1] - ref[1]
+                ok = abs(dx) <= UPPER_LIP_SIDE_X_TOLERANCE and abs(dy) <= UPPER_LIP_SIDE_Y_TOLERANCE
+                color = (0, 255, 0) if ok else (0, 0, 255)
+                cv2.putText(frame, f"dX={dx:+.1f} dY={dy:+.1f} {'OK' if ok else 'BAD'}",
+                            (10, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+                cv2.line(frame, tip, tuple(ref), color, 1)
+        else:
+            cv2.putText(frame, "Ref: missing, click Save upper lip (front+side)",
+                        (10, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 180, 255), 1, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_hud_panel(frame, top_left, bottom_right, alpha=0.58):
+        x1, y1 = top_left
+        x2, y2 = bottom_right
+        h, w = frame.shape[:2]
+        x1 = max(0, min(w - 1, int(x1)))
+        y1 = max(0, min(h - 1, int(y1)))
+        x2 = max(0, min(w - 1, int(x2)))
+        y2 = max(0, min(h - 1, int(y2)))
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (18, 18, 18), -1)
+        cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 80), 1)
+
+    @staticmethod
+    def _pump_cv_events():
+        try:
+            cv2.pollKey()
+        except AttributeError:
+            cv2.waitKey(1)
+
+    def save_current_upper_lip_side_baseline(self):
+        if self.scorer.upper_lip_baseline is None or "ulr" not in self.scorer.upper_lip_baseline:
+            print("[UpperLip Side] Save front ULR baseline first.")
+            return False
+        side = self.collect_upper_lip_side_samples(n_frames=30, trim=5)
+        if side is None:
+            return False
+        tip = [int(round(side["tip"][0])), int(round(side["tip"][1]))]
+        roi = side["roi"]
+        ulr = self.scorer.upper_lip_baseline["ulr"]
+        self.scorer.upper_lip_baseline = {
+            **self.scorer.upper_lip_baseline,
+            "side_upper_tip": tip,
+            "side_roi": roi,
+        }
+        save_upper_lip_baseline(ulr=ulr, side_upper_tip=tip, side_roi=roi)
+        print(f"[UpperLip Side] Saved side upper tip={tip}, roi={roi}")
+        return True
+
+    def collect_lower_lip_side_samples(self, n_frames: int = 30, trim: int = 5):
+        cap = self._ensure_side_cap()
+        if cap is None:
+            return None
+
+        bl = self.scorer.lower_lip_baseline or {}
+        roi = bl.get("side_roi", LOWER_LIP_SIDE_ROI)
+        side_window = f"Side Camera {LOWER_LIP_SIDE_CAMERA_INDEX} - Lips"
+        samples = []
+        collected = 0
+        while collected < n_frames:
+            if self.scorer.user_pressed_stop:
+                break
+            ok, frame = cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            if LOWER_LIP_SIDE_FLIP_VERTICAL:
+                frame = cv2.flip(frame, 0)
+            result = find_lip_front_points(
+                frame,
+                tuple(roi),
+                score_pct=LOWER_LIP_SIDE_SCORE_PCT,
+                a_delta=LOWER_LIP_SIDE_A_DELTA,
+                min_sat=LOWER_LIP_SIDE_MIN_SAT,
+                split_pct=LOWER_LIP_SIDE_SPLIT_PCT,
+                min_area=LOWER_LIP_SIDE_MIN_AREA,
+                face_direction=LOWER_LIP_SIDE_FACE_DIRECTION,
+            )
+            tip = result["lower"]
+            self._draw_lower_lip_side_sample_hud(frame, roi, tip, bl)
+            cv2.imshow(side_window, frame)
+            self._pump_cv_events()
+            if tip is None:
+                time.sleep(0.005)
+                continue
+            samples.append(tip)
+            collected += 1
+            self.scorer.update_hud([
+                (f"LowerLip Side Sampling: {collected}/{n_frames}", (10, 136), (200, 200, 200)),
+            ])
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [LowerLip Side] valid samples not enough: {len(samples)}, need >= {2*trim+1}")
+            return None
+
+        xs = sorted(p[0] for p in samples)[trim:-trim]
+        ys = sorted(p[1] for p in samples)[trim:-trim]
+        tip = (sum(xs) / len(xs), sum(ys) / len(ys))
+        ref = bl.get("side_lower_tip")
+        out = {
+            "tip": tip,
+            "roi": list(roi),
+            "qualified": False,
+        }
+        if ref is not None:
+            dx = tip[0] - float(ref[0])
+            dy = tip[1] - float(ref[1])
+            out.update({
+                "ref": ref,
+                "dx": dx,
+                "dy": dy,
+                "qualified": abs(dx) <= LOWER_LIP_SIDE_X_TOLERANCE and abs(dy) <= LOWER_LIP_SIDE_Y_TOLERANCE,
+            })
+        print(f"  [LowerLip Side] tip=({tip[0]:.1f},{tip[1]:.1f}) roi={roi}")
+        return out
+
+    def _draw_lower_lip_side_sample_hud(self, frame, roi, tip, baseline):
+        x1, y1, x2, y2 = [int(v) for v in roi]
+        self._draw_hud_panel(frame, (6, 8), (620, 176))
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 80, 80), 2)
+        cv2.putText(frame, f"Side cam {LOWER_LIP_SIDE_CAMERA_INDEX} LowerLip ROI",
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"ROI=[{x1},{y1},{x2},{y2}]  Dir={LOWER_LIP_SIDE_FACE_DIRECTION}  VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL}",
+                    (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Tol: X<={LOWER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={LOWER_LIP_SIDE_Y_TOLERANCE:.1f}px",
+                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
+        if tip is not None:
+            cv2.circle(frame, tip, 7, (255, 0, 180), -1)
+            cv2.circle(frame, tip, 12, (255, 255, 255), 2)
+            cv2.putText(frame, f"Lower tip: x={tip[0]} y={tip[1]}",
+                        (10, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, "Lower tip: not found",
+                        (10, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 1, cv2.LINE_AA)
+        if isinstance(baseline, dict) and baseline.get("side_lower_tip") is not None:
+            ref = [int(v) for v in baseline["side_lower_tip"]]
+            cv2.circle(frame, tuple(ref), 6, (0, 255, 255), -1)
+            cv2.putText(frame, f"Ref: x={ref[0]} y={ref[1]}",
+                        (10, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+            if tip is not None:
+                dx = tip[0] - ref[0]
+                dy = tip[1] - ref[1]
+                ok = abs(dx) <= LOWER_LIP_SIDE_X_TOLERANCE and abs(dy) <= LOWER_LIP_SIDE_Y_TOLERANCE
+                color = (0, 255, 0) if ok else (0, 0, 255)
+                cv2.putText(frame, f"dX={dx:+.1f} dY={dy:+.1f} {'OK' if ok else 'BAD'}",
+                            (10, 158), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+                cv2.line(frame, tip, tuple(ref), color, 1)
+        else:
+            cv2.putText(frame, "Ref: missing, click Save lower lip (front+side)",
+                        (10, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 180, 255), 1, cv2.LINE_AA)
+
+    def save_current_lower_lip_side_baseline(self):
+        if self.scorer.lower_lip_baseline is None or "llr" not in self.scorer.lower_lip_baseline:
+            print("[LowerLip Side] Save front LLR baseline first.")
+            return False
+        side = self.collect_lower_lip_side_samples(n_frames=30, trim=5)
+        if side is None:
+            return False
+        tip = [int(round(side["tip"][0])), int(round(side["tip"][1]))]
+        roi = side["roi"]
+        llr = self.scorer.lower_lip_baseline["llr"]
+        self.scorer.lower_lip_baseline = {
+            **self.scorer.lower_lip_baseline,
+            "side_lower_tip": tip,
+            "side_roi": roi,
+        }
+        save_lower_lip_baseline(llr=llr, side_lower_tip=tip, side_roi=roi)
+        print(f"[LowerLip Side] Saved side lower tip={tip}, roi={roi}")
+        return True
+
+    def check_upper_lip_front_side(self):
+        front = self.collect_upper_lip_samples(n_frames=30, trim=5)
+        side = self.collect_upper_lip_side_samples(n_frames=30, trim=5)
+        if front is None or side is None:
+            return {"qualified": False, "front": front, "side": side}
+        ok = bool(front["qualified"] and side.get("qualified"))
+        return {"qualified": ok, "front": front, "side": side}
 
     # ==================================================================
     # 多帧采集 + 修剪平均 — 眼球
@@ -519,6 +821,134 @@ class EyeAutoTuner:
     # ==================================================================
     # 引导式自动调整 — 上唇 (A16)
     # ==================================================================
+
+    def auto_adjust_upper_lip_front_side(
+        self,
+        step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """Adjust upper lip with front ULR and side-view front-point checks.
+
+        A16 follows the front ULR error. A17 follows the side upper-lip x error.
+        Both channels are clamped to their YAML ranges and sent in the same loop.
+        """
+        if max_iterations is None:
+            max_iterations = UPPER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = UPPER_LIP_WAIT_SECONDS
+
+        bl = self.scorer.upper_lip_baseline
+        if bl is None or "ulr" not in bl:
+            print("[WARN] Missing upper lip front ULR baseline.")
+            return False, 0, {}
+        if "side_upper_tip" not in bl:
+            print("[WARN] Missing upper lip side baseline. Save side upper lip point first.")
+            return False, 0, {}
+
+        ch_front = UPPER_LIP_CHANNEL
+        ch_side = UPPER_LIP_SIDE_CHANNEL
+        front_range = self._angle_range(ch_front)
+        side_range = self._angle_range(ch_side)
+        front_angle = self._temp_deg(ch_front, default=round(sum(front_range) / 2))
+        side_angle = self._temp_deg(ch_side, default=round(sum(side_range) / 2))
+        front_sign = getattr(self, "_upper_lip_flip", 1)
+        side_sign = getattr(self, "_upper_lip_side_flip", 1)
+
+        print("=" * 60)
+        print("  Upper lip auto adjust: front ULR + side front point")
+        print(f"  A16 range={front_range}, A17 range={side_range}, step={step}")
+        print(f"  Target: ULR tol={UPPER_LIP_ULR_TOLERANCE}, side x tol={UPPER_LIP_SIDE_X_TOLERANCE}px")
+        print(f"  Baseline: ULR={bl['ulr']:.4f}, side_upper_tip={bl['side_upper_tip']}")
+        print("=" * 60)
+
+        self.scorer.start_display()
+        iteration = 0
+        sleep_chunk = 0.1
+        final_data = {}
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                if self.scorer.user_pressed_stop:
+                    break
+
+                self.scorer.update_hud([
+                    (f"[UpperLip FS Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"A16={front_angle} A17={side_angle}", (10, 118), (0, 255, 255)),
+                ])
+
+                front = self.collect_upper_lip_samples(n_frames=30, trim=5)
+                side = self.collect_upper_lip_side_samples(n_frames=30, trim=5)
+                final_data = {"front": front, "side": side}
+                if front is None or side is None:
+                    print(f"  [UpperLip FS Iter {iteration:3d}] missing sample")
+                    time.sleep(wait_seconds)
+                    continue
+
+                front_delta = front["delta"]
+                side_dx = side.get("dx", 0.0)
+                side_dy = side.get("dy", 0.0)
+                front_ok = abs(front_delta) <= UPPER_LIP_ULR_TOLERANCE
+                side_ok = side.get("qualified", False)
+
+                print(
+                    f"  [UpperLip FS Iter {iteration:3d}] "
+                    f"front ULR={front['ulr']:.4f} d={front_delta:+.4f} ok={front_ok} | "
+                    f"side tip=({side['tip'][0]:.1f},{side['tip'][1]:.1f}) "
+                    f"dx={side_dx:+.1f} dy={side_dy:+.1f} ok={side_ok}"
+                )
+
+                if front_ok and side_ok:
+                    self.scorer.update_hud([
+                        ("UPPER LIP FRONT+SIDE PASSED", (100, 80), (0, 255, 0)),
+                    ])
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.export_angle_config(
+                        all_angles,
+                        chin_angle=self._temp_deg(MOUTH_CHIN_CHANNEL),
+                        lower_lip_angle=self._temp_deg(LOWER_LIP_CHANNEL),
+                        upper_lip_angle=front_angle,
+                    )
+                    return True, iteration, final_data
+
+                moved = False
+                if not front_ok:
+                    front_dir = -1 if front_delta > UPPER_LIP_ULR_TOLERANCE else 1
+                    new_front = round(front_angle + front_sign * front_dir * step)
+                    new_front = max(front_range[0], min(front_range[1], new_front))
+                    if new_front != front_angle:
+                        front_angle = new_front
+                        moved = True
+
+                if not side_ok and abs(side_dx) > UPPER_LIP_SIDE_X_TOLERANCE:
+                    # A17: 前=165, 后=200. side_dx>0 表示上唇前点太靠前，需增大角度往后。
+                    side_dir = 1 if side_dx > UPPER_LIP_SIDE_X_TOLERANCE else -1
+                    new_side = round(side_angle + side_sign * side_dir * step)
+                    new_side = max(side_range[0], min(side_range[1], new_side))
+                    if new_side != side_angle:
+                        side_angle = new_side
+                        moved = True
+
+                if moved:
+                    self.send_servo(ch_front, front_angle, front_range)
+                    self.send_servo(ch_side, side_angle, side_range)
+                    print(f"  [UpperLip FS Iter {iteration:3d}] move A16={front_angle}, A17={side_angle}")
+                else:
+                    print(f"  [UpperLip FS Iter {iteration:3d}] no legal move available")
+
+                waited = 0.0
+                while waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - waited))
+                    waited += sleep_chunk
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            return False, iteration, final_data
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
 
     def auto_adjust_upper_lip(
         self,
@@ -2358,6 +2788,130 @@ class EyeAutoTuner:
     # 引导式自动调整 — 下唇 (A19)
     # ==================================================================
 
+    def auto_adjust_lower_lip_front_side(
+        self,
+        step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """Adjust lower lip with front LLR and side-view front-point checks."""
+        if max_iterations is None:
+            max_iterations = LOWER_LIP_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = LOWER_LIP_WAIT_SECONDS
+
+        bl = self.scorer.lower_lip_baseline
+        if bl is None or "llr" not in bl:
+            print("[WARN] Missing lower lip front LLR baseline.")
+            return False, 0, {}
+        if "side_lower_tip" not in bl:
+            print("[WARN] Missing lower lip side baseline. Save lower lip front+side first.")
+            return False, 0, {}
+
+        ch_front = LOWER_LIP_CHANNEL
+        ch_side = LOWER_LIP_SIDE_CHANNEL
+        front_range = self._angle_range(ch_front)
+        side_range = self._angle_range(ch_side)
+        front_angle = self._temp_deg(ch_front, default=round(sum(front_range) / 2))
+        side_angle = self._temp_deg(ch_side, default=round(sum(side_range) / 2))
+        front_sign = getattr(self, "_lower_lip_flip", -1)
+        side_sign = getattr(self, "_lower_lip_side_flip", 1)
+
+        print("=" * 60)
+        print("  Lower lip auto adjust: front LLR + side front point")
+        print(f"  A19 range={front_range}, A18 range={side_range}, step={step}")
+        print(f"  Target: LLR tol={LOWER_LIP_LLR_TOLERANCE}, side x tol={LOWER_LIP_SIDE_X_TOLERANCE}px")
+        print(f"  Baseline: LLR={bl['llr']:.4f}, side_lower_tip={bl['side_lower_tip']}")
+        print("=" * 60)
+
+        self.scorer.start_display()
+        iteration = 0
+        sleep_chunk = 0.1
+        final_data = {}
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                if self.scorer.user_pressed_stop:
+                    break
+
+                self.scorer.update_hud([
+                    (f"[LowerLip FS Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"A19={front_angle} A18={side_angle}", (10, 118), (0, 255, 255)),
+                ])
+
+                front = self.collect_lower_lip_samples(n_frames=30, trim=5)
+                side = self.collect_lower_lip_side_samples(n_frames=30, trim=5)
+                final_data = {"front": front, "side": side}
+                if front is None or side is None:
+                    print(f"  [LowerLip FS Iter {iteration:3d}] missing sample")
+                    time.sleep(wait_seconds)
+                    continue
+
+                front_delta = front["delta"]
+                side_dx = side.get("dx", 0.0)
+                side_dy = side.get("dy", 0.0)
+                front_ok = abs(front_delta) <= LOWER_LIP_LLR_TOLERANCE
+                side_ok = side.get("qualified", False)
+
+                print(
+                    f"  [LowerLip FS Iter {iteration:3d}] "
+                    f"front LLR={front['llr']:.4f} d={front_delta:+.4f} ok={front_ok} | "
+                    f"side tip=({side['tip'][0]:.1f},{side['tip'][1]:.1f}) "
+                    f"dx={side_dx:+.1f} dy={side_dy:+.1f} ok={side_ok}"
+                )
+
+                if front_ok and side_ok:
+                    self.scorer.update_hud([
+                        ("LOWER LIP FRONT+SIDE PASSED", (100, 80), (0, 255, 0)),
+                    ])
+                    all_angles = [self.controller.list_temp_deg[c] for c in EYE_SERVO_CHANNELS]
+                    self.export_angle_config(
+                        all_angles,
+                        chin_angle=self._temp_deg(MOUTH_CHIN_CHANNEL),
+                        lower_lip_angle=front_angle,
+                        upper_lip_angle=self._temp_deg(UPPER_LIP_CHANNEL),
+                    )
+                    return True, iteration, final_data
+
+                moved = False
+                if not front_ok:
+                    front_dir = -1 if front_delta > LOWER_LIP_LLR_TOLERANCE else 1
+                    new_front = round(front_angle + front_sign * front_dir * step)
+                    new_front = max(front_range[0], min(front_range[1], new_front))
+                    if new_front != front_angle:
+                        front_angle = new_front
+                        moved = True
+
+                if not side_ok and abs(side_dx) > LOWER_LIP_SIDE_X_TOLERANCE:
+                    # A18: 前=240, 后=180. side_dx>0 表示下唇前点太靠前，需减小角度往后。
+                    side_dir = -1 if side_dx > LOWER_LIP_SIDE_X_TOLERANCE else 1
+                    new_side = round(side_angle + side_sign * side_dir * step)
+                    new_side = max(side_range[0], min(side_range[1], new_side))
+                    if new_side != side_angle:
+                        side_angle = new_side
+                        moved = True
+
+                if moved:
+                    self.send_servo(ch_front, front_angle, front_range)
+                    self.send_servo(ch_side, side_angle, side_range)
+                    print(f"  [LowerLip FS Iter {iteration:3d}] move A19={front_angle}, A18={side_angle}")
+                else:
+                    print(f"  [LowerLip FS Iter {iteration:3d}] no legal move available")
+
+                waited = 0.0
+                while waited < wait_seconds:
+                    time.sleep(min(sleep_chunk, wait_seconds - waited))
+                    waited += sleep_chunk
+                    if self.scorer.user_pressed_stop:
+                        break
+
+            return False, iteration, final_data
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
     def auto_adjust_lower_lip(
         self,
         step: float = 1.0,
@@ -3123,6 +3677,12 @@ class EyeAutoTuner:
                 self.scorer.close()  # 内部会 stop_display
             except Exception:
                 pass
+        if self.side_cap:
+            try:
+                self.side_cap.release()
+            except Exception:
+                pass
+            self.side_cap = None
         if self.controller:
             try:
                 self.controller.close()

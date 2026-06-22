@@ -42,12 +42,12 @@ RIGHT_EYE_CORNERS = (362, 263)
 
 # 眼皮自动调整参数
 EYELID_WAIT_SECONDS = 1.0      # 每次调整后等待秒数
-EYELID_MAX_ITERATIONS = 30     # 最大调整轮次
+EYELID_MAX_ITERATIONS = 100     # 最大调整轮次
 EYEBROW_BIG_SYMMETRY_TOLERANCE = 0.005 # 眉毛对称容差（大范围，±2%）
 EYEBROW_CUSTOM_BIG_TOLERANCE = 0.01 # 眉毛高低评分大范围容差（±1%）
 EYEBROW_CUSTOM_SLOPE_TOLERANCE = 0.03   # 眉毛斜率容差（±3%）
 EYEBROW_WAIT_SECONDS = 1.0             # 每次调整后等待秒数
-EYEBROW_MAX_ITERATIONS = 30            # 最大调整轮次
+EYEBROW_MAX_ITERATIONS = 100            # 最大调整轮次
 
 # ---- slope 计算用关键点 (眉弓上缘，骨头不动，适合斜率) ----
 # 左眉: 眉弓上缘8个关键点
@@ -71,7 +71,7 @@ RIGHT_IRIS_CENTER = 473
 MOUTH_BASELINE_FILE = "mouth_baseline.json"
 MOUTH_MAR_TOLERANCE = 0.015          # MAR 偏差容差
 MOUTH_WAIT_SECONDS = 1.0
-MOUTH_MAX_ITERATIONS = 30
+MOUTH_MAX_ITERATIONS = 100
 MOUTH_CHIN_CHANNEL = 26              # A26 下巴
 
 # MAR 计算用关键点 (MediaPipe 478)
@@ -86,8 +86,21 @@ MOUTH_NORM_RIGHT = 263 # 右眼外角 — 归一化参考
 LOWER_LIP_BASELINE_FILE = "lower_lip_baseline.json"
 LOWER_LIP_LLR_TOLERANCE = 0.005      # LLR 偏差容差
 LOWER_LIP_WAIT_SECONDS = 1.0
-LOWER_LIP_MAX_ITERATIONS = 30
-LOWER_LIP_CHANNEL = 19               # A19 中下嘴唇
+LOWER_LIP_MAX_ITERATIONS = 100
+LOWER_LIP_CHANNEL = 19               # A19 下嘴唇正面: 上(210) - 下(135)
+LOWER_LIP_SIDE_CHANNEL = 18          # A18 下嘴唇侧面: 前(240) - 后(180)
+LOWER_LIP_PAIR_CHANNELS = [19, 18]   # 下嘴唇自动调整同时控制 A19/A18
+LOWER_LIP_SIDE_CAMERA_INDEX = 1
+LOWER_LIP_SIDE_FLIP_VERTICAL = True
+LOWER_LIP_SIDE_ROI = [720, 820, 1060, 1080]
+LOWER_LIP_SIDE_FACE_DIRECTION = "right"
+LOWER_LIP_SIDE_X_TOLERANCE = 3.0     # 侧面下唇前点 x 像素容差
+LOWER_LIP_SIDE_Y_TOLERANCE = 6.0     # 侧面下唇前点 y 像素容差，仅用于合格判定
+LOWER_LIP_SIDE_SCORE_PCT = 76
+LOWER_LIP_SIDE_A_DELTA = 3
+LOWER_LIP_SIDE_MIN_SAT = 18
+LOWER_LIP_SIDE_SPLIT_PCT = 58
+LOWER_LIP_SIDE_MIN_AREA = 80
 
 # LLR 计算用关键点 (MediaPipe 478)
 LL_LIP_UPPER = 14      # 下唇上缘 (唇红边界)
@@ -101,8 +114,23 @@ LL_NORM_RIGHT = 263     # 右眼外角 — 归一化参考
 UPPER_LIP_BASELINE_FILE = "upper_lip_baseline.json"
 UPPER_LIP_ULR_TOLERANCE = 0.002      # ULR 偏差容差
 UPPER_LIP_WAIT_SECONDS = 1.0
-UPPER_LIP_MAX_ITERATIONS = 30
-UPPER_LIP_CHANNEL = 16               # A16 中上嘴唇
+UPPER_LIP_MAX_ITERATIONS = 100
+UPPER_LIP_CHANNEL = 16               # A16 中上嘴唇: 上(100) - 下(190)
+UPPER_LIP_SIDE_CHANNEL = 17          # A17 上嘴唇侧面辅助舵机: 前(165) - 后(200)
+UPPER_LIP_PAIR_CHANNELS = [16, 17]   # 上嘴唇自动调整同时控制 A16/A17
+
+# 侧面摄像头上唇前点参数。ROI 为摄像机 1 画面中的嘴部范围 [x1, y1, x2, y2]。
+UPPER_LIP_SIDE_CAMERA_INDEX = 1
+UPPER_LIP_SIDE_FLIP_VERTICAL = True  # 摄像机 1 侧面画面垂直翻转后再检测/显示
+UPPER_LIP_SIDE_ROI = [720, 820, 1060, 1080]
+UPPER_LIP_SIDE_FACE_DIRECTION = "right"
+UPPER_LIP_SIDE_X_TOLERANCE = 3.0     # 侧面上唇前点 x 像素容差
+UPPER_LIP_SIDE_Y_TOLERANCE = 6.0     # 侧面上唇前点 y 像素容差，仅用于合格判定
+UPPER_LIP_SIDE_SCORE_PCT = 76
+UPPER_LIP_SIDE_A_DELTA = 3
+UPPER_LIP_SIDE_MIN_SAT = 18
+UPPER_LIP_SIDE_SPLIT_PCT = 58
+UPPER_LIP_SIDE_MIN_AREA = 80
 
 # ULR 计算用关键点 (MediaPipe 478)
 UL_LIP_TOP = 0         # 上唇上缘(人中) — mp0
@@ -129,7 +157,7 @@ MOUTH_CORNER_RIGHT_IDX = 291      # 右嘴角 MediaPipe 索引
 MOUTH_CORNER_TOLERANCE = 1      # 水平像素容差 (px)
 MOUTH_CORNER_Y_TOLERANCE = 1    # 垂直像素容差 (px) — 更严格
 MOUTH_CORNER_WAIT_SECONDS = 1.0
-MOUTH_CORNER_MAX_ITERATIONS = 30
+MOUTH_CORNER_MAX_ITERATIONS = 100
 # A22=右嘴角水平(前→后), A23=左嘴角垂直(上→下), A24=左嘴角水平(前→后), A25=右嘴角垂直(上→下)
 MOUTH_CORNER_H_CHANNELS = [24, 22]     # [左水平A24, 右水平A22]
 MOUTH_CORNER_V_CHANNELS = [23, 25]     # [左垂直A23, 右垂直A25]

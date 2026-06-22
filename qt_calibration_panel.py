@@ -3,6 +3,33 @@ import sys
 import time
 
 import cv2
+import numpy as np
+
+from eye_constants import (
+    LOWER_LIP_SIDE_A_DELTA,
+    LOWER_LIP_SIDE_CAMERA_INDEX,
+    LOWER_LIP_SIDE_FACE_DIRECTION,
+    LOWER_LIP_SIDE_FLIP_VERTICAL,
+    LOWER_LIP_SIDE_MIN_AREA,
+    LOWER_LIP_SIDE_MIN_SAT,
+    LOWER_LIP_SIDE_ROI,
+    LOWER_LIP_SIDE_SCORE_PCT,
+    LOWER_LIP_SIDE_SPLIT_PCT,
+    LOWER_LIP_SIDE_X_TOLERANCE,
+    LOWER_LIP_SIDE_Y_TOLERANCE,
+    UPPER_LIP_SIDE_A_DELTA,
+    UPPER_LIP_SIDE_CAMERA_INDEX,
+    UPPER_LIP_SIDE_FACE_DIRECTION,
+    UPPER_LIP_SIDE_FLIP_VERTICAL,
+    UPPER_LIP_SIDE_MIN_AREA,
+    UPPER_LIP_SIDE_MIN_SAT,
+    UPPER_LIP_SIDE_ROI,
+    UPPER_LIP_SIDE_SCORE_PCT,
+    UPPER_LIP_SIDE_SPLIT_PCT,
+    UPPER_LIP_SIDE_X_TOLERANCE,
+    UPPER_LIP_SIDE_Y_TOLERANCE,
+)
+from lip_front_detector import find_lip_front_points
 
 try:
     from PySide6.QtCore import QThread, Qt, Signal
@@ -52,6 +79,8 @@ from ellseg_scorer import (
     load_mouth_baseline,
     load_mouth_corners_baseline,
     load_upper_lip_baseline,
+    save_lower_lip_side_roi,
+    save_upper_lip_side_roi,
     save_current_as_template,
     set_active_template,
     template_section_exists,
@@ -80,6 +109,15 @@ class DetectorThread(QThread):
         self._route_running = False
         self.detector = None
         self._tuner = None  # 缓存 tuner，供手动控制使用
+        self.side_cap = None
+        self.side_window_name = f"Side Camera {UPPER_LIP_SIDE_CAMERA_INDEX} - Lips"
+        self._upper_side_runtime_roi = None
+        self._lower_side_runtime_roi = None
+        self._side_roi_select_enabled = False
+        self._side_roi_select_target = "upper"
+        self._side_roi_dragging = False
+        self._side_roi_start = None
+        self._side_roi_current = None
 
     def _ensure_tuner(self):
         """延迟初始化调优实例（舵机控制器），供手动控制命令复用"""
@@ -90,6 +128,7 @@ class DetectorThread(QThread):
                     detector=self.detector,
                 )
                 t.initialize()
+                t.side_cap = self.side_cap
                 self._tuner = t
                 self.log.emit("Servo controller initialized for manual control.")
             except Exception as exc:
@@ -123,6 +162,7 @@ class DetectorThread(QThread):
             self.detector.enable_ellseg = True
             self.detector.start_display()
             self.log.emit("Calibration camera started. [MP+EllSeg ON by default]")
+            self._open_side_camera()
             while self._running:
                 if self._route_running:
                     # 路线运行中，只 drain 命令，不做 capture/detect
@@ -132,6 +172,7 @@ class DetectorThread(QThread):
                 ok, frame = self.detector.capture()
                 if ok:
                     self.detector.detect(frame)
+                self._update_side_camera()
                 self._drain_commands()
                 if self.detector.user_pressed_stop:
                     self.log.emit("OpenCV window requested stop.")
@@ -144,10 +185,244 @@ class DetectorThread(QThread):
                 if self.detector is not None:
                     self.detector.stop_display()
                     self.detector.close()
+                self._close_side_camera()
             finally:
                 self.detector = None
                 self.status.emit("Camera stopped")
                 self.stopped.emit()
+
+    def _open_side_camera(self):
+        if self.side_cap is not None and self.side_cap.isOpened():
+            return True
+        cap = cv2.VideoCapture(UPPER_LIP_SIDE_CAMERA_INDEX, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            self.log.emit(f"[WARN] Side camera {UPPER_LIP_SIDE_CAMERA_INDEX} failed to open.")
+            return False
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        self.side_cap = cap
+        if self._tuner not in (None, False):
+            self._tuner.side_cap = cap
+        cv2.namedWindow(self.side_window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.side_window_name, 960, 540)
+        cv2.setMouseCallback(self.side_window_name, self._on_side_mouse)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.log.emit(f"Side camera opened: cam{UPPER_LIP_SIDE_CAMERA_INDEX} {w}x{h}")
+        return True
+
+    def _close_side_camera(self):
+        if self.side_cap is not None:
+            try:
+                self.side_cap.release()
+            except Exception:
+                pass
+            self.side_cap = None
+        try:
+            cv2.destroyWindow(self.side_window_name)
+        except Exception:
+            pass
+
+    def _update_side_camera(self):
+        if self.side_cap is None or not self.side_cap.isOpened():
+            return
+        ok, frame = self.side_cap.read()
+        if not ok:
+            frame = np.full((540, 960, 3), 180, dtype=np.uint8)
+            cv2.putText(frame, f"Side camera {UPPER_LIP_SIDE_CAMERA_INDEX}: read failed",
+                        (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.imshow(self.side_window_name, frame)
+            self._pump_cv_events()
+            return
+        if UPPER_LIP_SIDE_FLIP_VERTICAL:
+            frame = cv2.flip(frame, 0)
+        self._draw_side_hud(frame)
+        cv2.imshow(self.side_window_name, frame)
+        self._pump_cv_events()
+
+    def _pump_cv_events(self):
+        try:
+            cv2.pollKey()
+        except AttributeError:
+            cv2.waitKey(1)
+
+    def _draw_side_hud(self, frame):
+        upper_baseline = self.detector.upper_lip_baseline if self.detector is not None else None
+        lower_baseline = self.detector.lower_lip_baseline if self.detector is not None else None
+        upper_roi = self._current_side_roi("upper")
+        lower_roi = self._current_side_roi("lower")
+
+        upper_result = find_lip_front_points(
+            frame,
+            tuple(upper_roi),
+            score_pct=UPPER_LIP_SIDE_SCORE_PCT,
+            a_delta=UPPER_LIP_SIDE_A_DELTA,
+            min_sat=UPPER_LIP_SIDE_MIN_SAT,
+            split_pct=UPPER_LIP_SIDE_SPLIT_PCT,
+            min_area=UPPER_LIP_SIDE_MIN_AREA,
+            face_direction=UPPER_LIP_SIDE_FACE_DIRECTION,
+        )
+        lower_result = find_lip_front_points(
+            frame,
+            tuple(lower_roi),
+            score_pct=LOWER_LIP_SIDE_SCORE_PCT,
+            a_delta=LOWER_LIP_SIDE_A_DELTA,
+            min_sat=LOWER_LIP_SIDE_MIN_SAT,
+            split_pct=LOWER_LIP_SIDE_SPLIT_PCT,
+            min_area=LOWER_LIP_SIDE_MIN_AREA,
+            face_direction=LOWER_LIP_SIDE_FACE_DIRECTION,
+        )
+        upper_tip = upper_result.get("upper")
+        lower_tip = lower_result.get("lower")
+
+        panel_bottom = 286 if self._side_roi_select_enabled else 256
+        self._draw_hud_panel(frame, (6, 8), (620, panel_bottom))
+        self._draw_lip_side_status(
+            frame, "Upper", upper_roi, upper_tip, upper_baseline,
+            "side_upper_tip", UPPER_LIP_SIDE_X_TOLERANCE, UPPER_LIP_SIDE_Y_TOLERANCE,
+            (0, 80, 255), (0, 0, 255), 28,
+        )
+        self._draw_lip_side_status(
+            frame, "Lower", lower_roi, lower_tip, lower_baseline,
+            "side_lower_tip", LOWER_LIP_SIDE_X_TOLERANCE, LOWER_LIP_SIDE_Y_TOLERANCE,
+            (255, 80, 80), (255, 0, 180), 146,
+        )
+        cv2.putText(frame, f"Side cam {UPPER_LIP_SIDE_CAMERA_INDEX} Lips",
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Dir={UPPER_LIP_SIDE_FACE_DIRECTION}  VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL}",
+                    (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
+
+        if self._side_roi_select_enabled:
+            cv2.putText(frame, f"ROI SELECT {self._side_roi_select_target}: drag lip area",
+                        (10, 274), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        if self._side_roi_dragging and self._side_roi_start and self._side_roi_current:
+            sx, sy = self._side_roi_start
+            cx, cy = self._side_roi_current
+            x_min, x_max = sorted((sx, cx))
+            y_min, y_max = sorted((sy, cy))
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 255, 255), 2)
+
+    @staticmethod
+    def _draw_lip_side_status(frame, label, roi, tip, baseline, ref_key,
+                              tol_x, tol_y, roi_color, tip_color, y):
+        x1, y1, x2, y2 = [int(v) for v in roi]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), roi_color, 2)
+        cv2.putText(frame, f"{label} ROI=[{x1},{y1},{x2},{y2}] Tol X<={tol_x:.1f} Y<={tol_y:.1f}",
+                    (10, y + 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 220, 255), 1, cv2.LINE_AA)
+        if tip is not None:
+            cv2.circle(frame, tip, 7, tip_color, -1)
+            cv2.circle(frame, tip, 12, (255, 255, 255), 2)
+            cv2.putText(frame, f"{label} tip: x={tip[0]} y={tip[1]}",
+                        (10, y + 78), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, f"{label} tip: not found",
+                        (10, y + 78), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        if isinstance(baseline, dict) and baseline.get(ref_key) is not None:
+            ref = [int(v) for v in baseline[ref_key]]
+            cv2.circle(frame, tuple(ref), 6, (0, 255, 255), -1)
+            if tip is not None:
+                dx = tip[0] - ref[0]
+                dy = tip[1] - ref[1]
+                ok = abs(dx) <= tol_x and abs(dy) <= tol_y
+                color = (0, 255, 0) if ok else (0, 0, 255)
+                cv2.putText(frame, f"{label} dX={dx:+.1f} dY={dy:+.1f} {'OK' if ok else 'BAD'}",
+                            (10, y + 104), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+                cv2.line(frame, tip, tuple(ref), color, 1)
+            else:
+                cv2.putText(frame, f"{label} ref: x={ref[0]} y={ref[1]}",
+                            (10, y + 104), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, f"{label} ref: missing",
+                        (10, y + 104), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 180, 255), 1, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_hud_panel(frame, top_left, bottom_right, alpha=0.58):
+        x1, y1 = top_left
+        x2, y2 = bottom_right
+        h, w = frame.shape[:2]
+        x1 = max(0, min(w - 1, int(x1)))
+        y1 = max(0, min(h - 1, int(y1)))
+        x2 = max(0, min(w - 1, int(x2)))
+        y2 = max(0, min(h - 1, int(y2)))
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (18, 18, 18), -1)
+        cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (80, 80, 80), 1)
+
+    def _current_side_roi(self, target="upper"):
+        if target == "lower":
+            if self._lower_side_runtime_roi is not None:
+                return [int(v) for v in self._lower_side_runtime_roi]
+            baseline = self.detector.lower_lip_baseline if self.detector is not None else None
+            if isinstance(baseline, dict) and baseline.get("side_roi") is not None:
+                return [int(v) for v in baseline["side_roi"]]
+            return [int(v) for v in LOWER_LIP_SIDE_ROI]
+
+        if self._upper_side_runtime_roi is not None:
+            return [int(v) for v in self._upper_side_runtime_roi]
+        baseline = self.detector.upper_lip_baseline if self.detector is not None else None
+        if isinstance(baseline, dict) and baseline.get("side_roi") is not None:
+            return [int(v) for v in baseline["side_roi"]]
+        return [int(v) for v in UPPER_LIP_SIDE_ROI]
+
+    def _on_side_mouse(self, event, x, y, _flags, _param):
+        if not self._side_roi_select_enabled:
+            return
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self._side_roi_dragging = True
+            self._side_roi_start = (x, y)
+            self._side_roi_current = (x, y)
+            return
+        if event == cv2.EVENT_MOUSEMOVE and self._side_roi_dragging:
+            self._side_roi_current = (x, y)
+            return
+        if event == cv2.EVENT_LBUTTONUP and self._side_roi_dragging:
+            self._side_roi_dragging = False
+            self._side_roi_current = (x, y)
+            rect = self._normalize_side_roi(self._side_roi_start, self._side_roi_current)
+            self._side_roi_start = None
+            self._side_roi_current = None
+            if rect is None:
+                self.log.emit("侧面嘴唇 ROI 过小，未保存。")
+                return
+            target = self._side_roi_select_target
+            if target == "lower":
+                self._lower_side_runtime_roi = rect
+            else:
+                self._upper_side_runtime_roi = rect
+            self._side_roi_select_enabled = False
+            self._save_side_roi_to_current_template(rect, target)
+
+    def _normalize_side_roi(self, p1, p2):
+        if p1 is None or p2 is None:
+            return None
+        x1, y1 = p1
+        x2, y2 = p2
+        x1, x2 = sorted((int(x1), int(x2)))
+        y1, y2 = sorted((int(y1), int(y2)))
+        if x2 - x1 < 12 or y2 - y1 < 12:
+            return None
+        return [x1, y1, x2, y2]
+
+    def _save_side_roi_to_current_template(self, roi, target="upper"):
+        if self.detector is None:
+            return
+        if target == "lower":
+            bl = self.detector.lower_lip_baseline
+            side_tip = bl.get("side_lower_tip") if isinstance(bl, dict) else None
+            save_lower_lip_side_roi(side_roi=roi, side_lower_tip=side_tip)
+            self.detector.lower_lip_baseline = load_lower_lip_baseline()
+            if self._tuner not in (None, False):
+                self._tuner.scorer.lower_lip_baseline = self.detector.lower_lip_baseline
+            self.log.emit(f"侧面下唇 ROI 已保存到当前模板 JSON: {roi}")
+            return
+        bl = self.detector.upper_lip_baseline
+        side_tip = bl.get("side_upper_tip") if isinstance(bl, dict) else None
+        save_upper_lip_side_roi(side_roi=roi, side_upper_tip=side_tip)
+        self.detector.upper_lip_baseline = load_upper_lip_baseline()
+        if self._tuner not in (None, False):
+            self._tuner.scorer.upper_lip_baseline = self.detector.upper_lip_baseline
+        self.log.emit(f"侧面嘴唇 ROI 已保存到当前模板 JSON: {roi}")
 
     def _drain_commands(self):
         while True:
@@ -223,6 +498,50 @@ class DetectorThread(QThread):
                 self.log.emit(f"眼皮{label}: A8={a8}° A9={a9}°")
                 return
 
+            if command == "check_upper_lip_front_side":
+                tuner = self._ensure_tuner()
+                if tuner is None:
+                    self.log.emit("[ERROR] Servo controller not available.")
+                    return
+                result = tuner.check_upper_lip_front_side()
+                front = result.get("front") or {}
+                side = result.get("side") or {}
+                passed = bool(result.get("qualified"))
+                self.item_result.emit("上唇", "通过" if passed else "失败")
+                self.log.emit(
+                    "上唇正侧检查: "
+                    f"{'通过' if passed else '失败'} | "
+                    f"front Δ={front.get('delta', None)} | "
+                    f"side dx={side.get('dx', None)} dy={side.get('dy', None)}"
+                )
+                return
+
+            if command == "select_upper_lip_side_roi":
+                self._side_roi_select_enabled = True
+                self._side_roi_select_target = "upper"
+                self._side_roi_dragging = False
+                self._side_roi_start = None
+                self._side_roi_current = None
+                self.log.emit("侧面嘴唇 ROI 框选模式已开启：请在 Side Camera 窗口拖框嘴唇区域。")
+                return
+
+            if command == "select_lower_lip_side_roi":
+                self._side_roi_select_enabled = True
+                self._side_roi_select_target = "lower"
+                self._side_roi_dragging = False
+                self._side_roi_start = None
+                self._side_roi_current = None
+                self.log.emit("侧面下唇 ROI 框选模式已开启：请在 Side Camera 窗口拖框下唇区域。")
+                return
+
+            if command == "save_upper_lip":
+                self._save_upper_lip_front_side()
+                return
+
+            if command == "save_lower_lip":
+                self._save_lower_lip_front_side()
+                return
+
 
 
             save_map = {
@@ -230,8 +549,6 @@ class DetectorThread(QThread):
                 "save_eyelid": self.detector.save_current_eyelid_baseline,
                 "save_eyebrow": self.detector.save_current_eyebrow_baseline,
                 "save_mouth": self.detector.save_current_mouth_baseline,
-                "save_lower_lip": self.detector.save_current_lower_lip_baseline,
-                "save_upper_lip": self.detector.save_current_upper_lip_baseline,
                 "save_corners": self.detector.save_current_mouth_corners_baseline,
                 "save_head": self.detector.save_current_head_position_baseline,
                 "adjust_eyeline": self.detector.adjust_baseline_by_vertical_offset,
@@ -262,10 +579,44 @@ class DetectorThread(QThread):
         except Exception as exc:
             self.log.emit(f"[ERROR] {command}: {exc}")
 
+    def _save_upper_lip_front_side(self):
+        ok_front = self.detector.save_current_upper_lip_baseline()
+        if not ok_front:
+            self.log.emit("保存上唇(正面 ULR): FAILED")
+            return
+
+        tuner = self._ensure_tuner()
+        if tuner is None:
+            self._reload_template_baselines()
+            self.log.emit("保存上唇: 正面 OK，侧面 FAILED (servo/camera controller not available)")
+            return
+
+        ok_side = tuner.save_current_upper_lip_side_baseline()
+        self._reload_template_baselines()
+        self.log.emit(f"保存上唇(正侧): {'OK' if ok_side else 'PARTIAL'} "
+                      f"(front=OK side={'OK' if ok_side else 'FAILED'})")
+
+    def _save_lower_lip_front_side(self):
+        ok_front = self.detector.save_current_lower_lip_baseline()
+        if not ok_front:
+            self.log.emit("保存下唇(正面 LLR): FAILED")
+            return
+
+        tuner = self._ensure_tuner()
+        if tuner is None:
+            self._reload_template_baselines()
+            self.log.emit("保存下唇: 正面 OK，侧面 FAILED (servo/camera controller not available)")
+            return
+
+        ok_side = tuner.save_current_lower_lip_side_baseline()
+        self._reload_template_baselines()
+        self.log.emit(f"保存下唇(正侧): {'OK' if ok_side else 'PARTIAL'} "
+                      f"(front=OK side={'OK' if ok_side else 'FAILED'})")
+
     def _run_route(self, payload):
         if isinstance(payload, dict):
             route = payload.get("route")
-            max_iterations = int(payload.get("max_iterations", 50))
+            max_iterations = int(payload.get("max_iterations", 100))
         else:
             route = payload
             max_iterations = 50
@@ -309,6 +660,10 @@ class DetectorThread(QThread):
                 self._run_eyebrow(tuner, max_iterations)
             elif route == "eyelid":
                 self._run_eyelid(tuner, max_iterations)
+            elif route == "upper_lip":
+                self._run_upper_lip(tuner, max_iterations)
+            elif route == "lower_lip":
+                self._run_lower_lip(tuner, max_iterations)
         except Exception as exc:
             self.log.emit(f"[Route Error] {exc}")
             import traceback
@@ -362,13 +717,22 @@ class DetectorThread(QThread):
         self._emit_item_result("眼皮", passed, iterations)
 
     def _run_upper_lip(self, tuner, max_iterations):
+        self.log.emit(">>> Adjust: UpperLip A16(front)+A17(side) <<<")
         self._emit_item_running("上唇")
         if tuner.scorer.upper_lip_baseline is None:
             self.log.emit("上唇: 跳过 (无基线)")
             self.item_result.emit("上唇", "跳过 (无基线)")
             return
-        passed, iterations, _ = tuner.auto_adjust_upper_lip(
-            ulr_step=1.0,
+        if "ulr" not in tuner.scorer.upper_lip_baseline:
+            self.log.emit("上唇: 跳过 (无正面 ULR 基线，请先点“保存上唇 U”)")
+            self.item_result.emit("上唇", "跳过 (无正面基线)")
+            return
+        if "side_upper_tip" not in tuner.scorer.upper_lip_baseline:
+            self.log.emit("上唇: 跳过 (无侧面基线，请先点“保存上唇(正侧) U”)")
+            self.item_result.emit("上唇", "跳过 (无侧面基线)")
+            return
+        passed, iterations, _ = tuner.auto_adjust_upper_lip_front_side(
+            step=1.0,
             max_iterations=max_iterations,
             wait_seconds=1.0,
             keep_display=True,
@@ -409,7 +773,15 @@ class DetectorThread(QThread):
             self.log.emit("下唇: 跳过 (无基线)")
             self.item_result.emit("下唇", "跳过 (无基线)")
             return
-        passed, iterations, _ = tuner.auto_adjust_lower_lip(
+        if "llr" not in tuner.scorer.lower_lip_baseline:
+            self.log.emit("下唇: 跳过 (无正面 LLR 基线，请先点“保存下唇(正侧) L”)")
+            self.item_result.emit("下唇", "跳过 (无正面基线)")
+            return
+        if "side_lower_tip" not in tuner.scorer.lower_lip_baseline:
+            self.log.emit("下唇: 跳过 (无侧面基线，请先点“保存下唇(正侧) L”)")
+            self.item_result.emit("下唇", "跳过 (无侧面基线)")
+            return
+        passed, iterations, _ = tuner.auto_adjust_lower_lip_front_side(
             step=1.0,
             max_iterations=max_iterations,
             wait_seconds=1.0,
@@ -424,6 +796,8 @@ class CalibrationPanel(QMainWindow):
         "full": ["眼球", "上唇", "下巴", "嘴角", "下唇", "眉毛", "眼皮"],
         "eyebrow": ["眉毛"],
         "eyelid": ["眼皮"],
+        "upper_lip": ["上唇"],
+        "lower_lip": ["下唇"],
     }
     ITEM_KEYS = {
         "眼球": "eyeball",
@@ -501,8 +875,9 @@ class CalibrationPanel(QMainWindow):
             ("保存眼皮 E", lambda: self.send_detector("save_eyelid")),
             ("保存眉毛 B", lambda: self.send_detector("save_eyebrow")),
             ("保存嘴部 M", lambda: self.send_detector("save_mouth")),
-            ("保存下唇 L", lambda: self.send_detector("save_lower_lip")),
-            ("保存上唇 U", lambda: self.send_detector("save_upper_lip")),
+            ("保存下唇(正侧) L", lambda: self.send_detector("save_lower_lip")),
+            ("保存上唇(正侧) U", lambda: self.send_detector("save_upper_lip")),
+            ("框选侧面嘴ROI", lambda: self.send_detector("select_upper_lip_side_roi")),
             ("保存嘴角 C", lambda: self.send_detector("save_corners")),
             ("保存头位 D", lambda: self.send_detector("save_head")),
             ("眼线修正 V", lambda: self.send_detector("adjust_eyeline")),
@@ -517,6 +892,10 @@ class CalibrationPanel(QMainWindow):
             btn = QPushButton(label)
             btn.clicked.connect(slot)
             grid.addWidget(btn, idx // 2, idx % 2)
+        lower_roi_btn = QPushButton("框选侧面下唇ROI")
+        lower_roi_btn.clicked.connect(lambda: self.send_detector("select_lower_lip_side_roi"))
+        next_row = (len(buttons) + 1) // 2
+        grid.addWidget(lower_roi_btn, next_row, 0, 1, 2)
         return group
 
     def _build_manual_group(self):
@@ -539,22 +918,26 @@ class CalibrationPanel(QMainWindow):
         iter_row.addWidget(QLabel("最大调整次数"))
         self.max_iterations_spin = QSpinBox()
         self.max_iterations_spin.setRange(1, 500)
-        self.max_iterations_spin.setValue(50)
+        self.max_iterations_spin.setValue(100)
         self.max_iterations_spin.setSuffix(" 次")
         iter_row.addWidget(self.max_iterations_spin)
         layout.addLayout(iter_row)
 
         routes = [
-            ("只调眼球", lambda: self.start_route("eyeball")),
-            ("眼球 + 眉毛 + 眼皮", lambda: self.start_route("eye_only")),
             ("完整默认路线", lambda: self.start_route("full")),
+            ("眼球 + 眉毛 + 眼皮", lambda: self.start_route("eye_only")),
+            ("只调眼球", lambda: self.start_route("eyeball")),
             ("只调眉毛", lambda: self.start_route("eyebrow")),
             ("只调眼皮", lambda: self.start_route("eyelid")),
+            ("调整上唇(正侧)", lambda: self.start_route("upper_lip")),
         ]
         for label, slot in routes:
             btn = QPushButton(label)
             btn.clicked.connect(slot)
             layout.addWidget(btn)
+        lower_btn = QPushButton("调整下唇(正侧)")
+        lower_btn.clicked.connect(lambda: self.start_route("lower_lip"))
+        layout.addWidget(lower_btn)
         layout.addStretch(1)
         return group
 

@@ -34,7 +34,20 @@ BASELINE_SECTIONS = (
 )
 DEFAULT_TEMPLATE_NAME = "default"
 
-from eye_constants import EYEBALL_OFFSET_TOLERANCE, EYELID_EAR_TOLERANCE
+from eye_constants import (
+    EYEBALL_OFFSET_TOLERANCE,
+    EYELID_EAR_TOLERANCE,
+    LOWER_LIP_SIDE_CAMERA_INDEX,
+    LOWER_LIP_SIDE_FLIP_VERTICAL,
+    LOWER_LIP_SIDE_ROI,
+    LOWER_LIP_SIDE_X_TOLERANCE,
+    LOWER_LIP_SIDE_Y_TOLERANCE,
+    UPPER_LIP_SIDE_CAMERA_INDEX,
+    UPPER_LIP_SIDE_FLIP_VERTICAL,
+    UPPER_LIP_SIDE_ROI,
+    UPPER_LIP_SIDE_X_TOLERANCE,
+    UPPER_LIP_SIDE_Y_TOLERANCE,
+)
 TOLERANCE = EYEBALL_OFFSET_TOLERANCE        # 合格阈值 (像素)
 EMA_LM = 0.35         # MediaPipe 关键点 EMA
 EMA_ELL = 0.3         # EllSeg 椭圆 EMA
@@ -305,9 +318,23 @@ def _legacy_section(section, path):
         if section == "mouth":
             return {"mar": float(d["mar"])}
         if section == "lower_lip":
-            return {"llr": float(d["llr"])} if "llr" in d else {}
+            out = {}
+            if "llr" in d:
+                out["llr"] = float(d["llr"])
+            if "side_lower_tip" in d:
+                out["side_lower_tip"] = list(d["side_lower_tip"])
+            if "side_roi" in d:
+                out["side_roi"] = list(d["side_roi"])
+            return out
         if section == "upper_lip":
-            return {"ulr": float(d["ulr"])}
+            out = {}
+            if "ulr" in d:
+                out["ulr"] = float(d["ulr"])
+            if "side_upper_tip" in d:
+                out["side_upper_tip"] = list(d["side_upper_tip"])
+            if "side_roi" in d:
+                out["side_roi"] = list(d["side_roi"])
+            return out
         if section == "mouth_corners":
             return {
                 "nose": list(d["nose"]),
@@ -600,13 +627,39 @@ def load_mouth_baseline(filepath=None):
 # ============================================================
 # 下唇基线管理
 # ============================================================
-def save_lower_lip_baseline(llr, filepath=None):
+def save_lower_lip_baseline(llr, filepath=None, side_lower_tip=None, side_roi=None):
     data = {"llr": float(llr)}
+    if side_lower_tip is not None:
+        data["side_lower_tip"] = [int(side_lower_tip[0]), int(side_lower_tip[1])]
+    if side_roi is not None:
+        data["side_roi"] = [int(v) for v in side_roi]
     if filepath is not None:
         _write_json_file(filepath, data)
     else:
         _save_template_section("lower_lip", data)
-    print(f"[LowerLip Baseline] Saved: LLR={llr:.4f}")
+    side_msg = f", side_lower_tip={data['side_lower_tip']}" if "side_lower_tip" in data else ""
+    print(f"[LowerLip Baseline] Saved: LLR={llr:.4f}{side_msg}")
+
+def save_lower_lip_side_roi(side_roi, filepath=None, side_lower_tip=None):
+    data = {}
+    if filepath is None:
+        current = _load_template_section("lower_lip")
+        if isinstance(current, dict):
+            data.update(current)
+    else:
+        current = _read_json_file(filepath)
+        if isinstance(current, dict):
+            data.update(current)
+
+    data["side_roi"] = [int(v) for v in side_roi]
+    if side_lower_tip is not None:
+        data["side_lower_tip"] = [int(side_lower_tip[0]), int(side_lower_tip[1])]
+
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("lower_lip", data)
+    print(f"[LowerLip Baseline] Saved side ROI: {data['side_roi']}")
 
 def load_lower_lip_baseline(filepath=None):
     try:
@@ -614,10 +667,16 @@ def load_lower_lip_baseline(filepath=None):
         if not d:
             return None
         # 兼容旧格式 {llt, llp}
+        out = {}
         if "llr" in d:
-            return {"llr": float(d["llr"])}
-        else:
+            out["llr"] = float(d["llr"])
+        if "side_lower_tip" in d:
+            out["side_lower_tip"] = list(d["side_lower_tip"])
+        if "side_roi" in d:
+            out["side_roi"] = list(d["side_roi"])
+        if not out:
             return None
+        return out
     except Exception as e:
         print(f"[LowerLip Baseline] Load failed: {e}")
         return None
@@ -626,20 +685,55 @@ def load_lower_lip_baseline(filepath=None):
 # ============================================================
 # 上唇基线管理
 # ============================================================
-def save_upper_lip_baseline(ulr, filepath=None):
+def save_upper_lip_baseline(ulr, filepath=None, side_upper_tip=None, side_roi=None):
     data = {"ulr": float(ulr)}
+    if side_upper_tip is not None:
+        data["side_upper_tip"] = [int(side_upper_tip[0]), int(side_upper_tip[1])]
+    if side_roi is not None:
+        data["side_roi"] = [int(v) for v in side_roi]
     if filepath is not None:
         _write_json_file(filepath, data)
     else:
         _save_template_section("upper_lip", data)
-    print(f"[UpperLip Baseline] Saved: ULR={ulr:.4f}")
+    side_msg = f", side_upper_tip={data['side_upper_tip']}" if "side_upper_tip" in data else ""
+    print(f"[UpperLip Baseline] Saved: ULR={ulr:.4f}{side_msg}")
+
+def save_upper_lip_side_roi(side_roi, filepath=None, side_upper_tip=None):
+    data = {}
+    if filepath is None:
+        current = _load_template_section("upper_lip")
+        if isinstance(current, dict):
+            data.update(current)
+    else:
+        current = _read_json_file(filepath)
+        if isinstance(current, dict):
+            data.update(current)
+
+    data["side_roi"] = [int(v) for v in side_roi]
+    if side_upper_tip is not None:
+        data["side_upper_tip"] = [int(side_upper_tip[0]), int(side_upper_tip[1])]
+
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("upper_lip", data)
+    print(f"[UpperLip Baseline] Saved side ROI: {data['side_roi']}")
 
 def load_upper_lip_baseline(filepath=None):
     try:
         d = _load_template_section("upper_lip") if filepath is None else _read_json_file(filepath)
         if not d:
             return None
-        return {"ulr": float(d["ulr"])}
+        out = {}
+        if "ulr" in d:
+            out["ulr"] = float(d["ulr"])
+        if "side_upper_tip" in d:
+            out["side_upper_tip"] = list(d["side_upper_tip"])
+        if "side_roi" in d:
+            out["side_roi"] = list(d["side_roi"])
+        if not out:
+            return None
+        return out
     except Exception as e:
         print(f"[UpperLip Baseline] Load failed: {e}")
         return None
@@ -808,7 +902,8 @@ class EllSegDetector:
         self.lower_lip_baseline = load_lower_lip_baseline()
         if self.lower_lip_baseline:
             print(f"[LowerLip Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
-            print(f"  LLR = {self.lower_lip_baseline['llr']:.4f}")
+            if "llr" in self.lower_lip_baseline:
+                print(f"  LLR = {self.lower_lip_baseline['llr']:.4f}")
         else:
             print("[LowerLip Baseline] No lower lip baseline found.")
 
@@ -945,6 +1040,18 @@ class EllSegDetector:
                 cv2.putText(img, f"{'PASS' if q else 'FAIL'}", (10, 22), 0, 0.55,
                            (0, 255, 0) if q else (0, 0, 255), 1)
                 x_off = max(340, img.shape[1] - 430)
+                panel = img.copy()
+                cv2.rectangle(panel,
+                              (max(0, x_off - 10), 30),
+                              (img.shape[1] - 8, 508),
+                              (20, 20, 20),
+                              -1)
+                cv2.addWeighted(panel, 0.58, img, 0.42, 0, img)
+                cv2.rectangle(img,
+                              (max(0, x_off - 10), 30),
+                              (img.shape[1] - 8, 508),
+                              (80, 80, 80),
+                              1)
                 y_off = 44
                 off = det.get("offset", {})
                 for label, o in [("L", off.get("left")), ("R", off.get("right"))]:
@@ -1133,6 +1240,28 @@ class EllSegDetector:
                                      (int(nose_cur[0]), int(nose_cur[1])),
                                      nose_bl,
                                      (0, 0, 255), 1)
+
+                # 上唇侧面自动调整参数 — 右侧常驻显示
+                roi = UPPER_LIP_SIDE_ROI
+                if isinstance(self.upper_lip_baseline, dict) and self.upper_lip_baseline.get("side_roi") is not None:
+                    roi = self.upper_lip_baseline["side_roi"]
+                cv2.putText(img,
+                           f"ULSide tol: X<={UPPER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={UPPER_LIP_SIDE_Y_TOLERANCE:.1f}px",
+                           (x_off, 448), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           f"ULSide cam={UPPER_LIP_SIDE_CAMERA_INDEX} VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL} roi=[{roi[0]},{roi[1]},{roi[2]},{roi[3]}]",
+                           (x_off, 464), 0, 0.35, (200, 220, 255), 1)
+
+                # 下唇侧面自动调整参数 — 右侧常驻显示
+                lower_roi = LOWER_LIP_SIDE_ROI
+                if isinstance(self.lower_lip_baseline, dict) and self.lower_lip_baseline.get("side_roi") is not None:
+                    lower_roi = self.lower_lip_baseline["side_roi"]
+                cv2.putText(img,
+                           f"LLSide tol: X<={LOWER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={LOWER_LIP_SIDE_Y_TOLERANCE:.1f}px",
+                           (x_off, 482), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           f"LLSide cam={LOWER_LIP_SIDE_CAMERA_INDEX} VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL} roi=[{lower_roi[0]},{lower_roi[1]},{lower_roi[2]},{lower_roi[3]}]",
+                           (x_off, 498), 0, 0.35, (200, 220, 255), 1)
 
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
@@ -1853,7 +1982,7 @@ class EllSegDetector:
                 return None
             lms_smooth = self._last_lms_smooth
 
-        if self.upper_lip_baseline is None:
+        if self.upper_lip_baseline is None or "ulr" not in self.upper_lip_baseline:
             return None
 
         ulr = self._calc_ulr(lms_smooth)
@@ -1877,8 +2006,17 @@ class EllSegDetector:
             lms_smooth = self._last_lms_smooth
 
         ulr = self._calc_ulr(lms_smooth)
+        side_upper_tip = None
+        side_roi = None
+        if isinstance(self.upper_lip_baseline, dict):
+            side_upper_tip = self.upper_lip_baseline.get("side_upper_tip")
+            side_roi = self.upper_lip_baseline.get("side_roi")
         self.upper_lip_baseline = {"ulr": ulr}
-        save_upper_lip_baseline(ulr=ulr)
+        if side_upper_tip is not None:
+            self.upper_lip_baseline["side_upper_tip"] = side_upper_tip
+        if side_roi is not None:
+            self.upper_lip_baseline["side_roi"] = side_roi
+        save_upper_lip_baseline(ulr=ulr, side_upper_tip=side_upper_tip, side_roi=side_roi)
         return True
 
     # ==================================================================
@@ -2362,7 +2500,7 @@ class EllSegDetector:
                 return None
             lms_smooth = self._last_lms_smooth
 
-        if self.lower_lip_baseline is None:
+        if self.lower_lip_baseline is None or "llr" not in self.lower_lip_baseline:
             return None
 
         llr = self._calc_llr(lms_smooth)
@@ -2386,8 +2524,17 @@ class EllSegDetector:
             lms_smooth = self._last_lms_smooth
 
         llr = self._calc_llr(lms_smooth)
+        side_lower_tip = None
+        side_roi = None
+        if isinstance(self.lower_lip_baseline, dict):
+            side_lower_tip = self.lower_lip_baseline.get("side_lower_tip")
+            side_roi = self.lower_lip_baseline.get("side_roi")
         self.lower_lip_baseline = {"llr": llr}
-        save_lower_lip_baseline(llr=llr)
+        if side_lower_tip is not None:
+            self.lower_lip_baseline["side_lower_tip"] = side_lower_tip
+        if side_roi is not None:
+            self.lower_lip_baseline["side_roi"] = side_roi
+        save_lower_lip_baseline(llr=llr, side_lower_tip=side_lower_tip, side_roi=side_roi)
         return True
 
     def adjust_baseline_by_vertical_offset(self, det=None):
