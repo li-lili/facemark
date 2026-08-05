@@ -7,7 +7,6 @@ import cv2
 from ellseg_scorer import save_lower_lip_baseline, save_upper_lip_baseline
 from eye_constants import (
     LOWER_LIP_SIDE_A_DELTA,
-    LOWER_LIP_SIDE_CAMERA_INDEX,
     LOWER_LIP_SIDE_FACE_DIRECTION,
     LOWER_LIP_SIDE_FLIP_VERTICAL,
     LOWER_LIP_SIDE_MIN_AREA,
@@ -44,18 +43,22 @@ SIDE_HUD_ALPHA = 0.58
 
 
 class LipSideSamplingMixin:
+    def _side_camera_index(self):
+        return int(getattr(self, "side_camera_index", UPPER_LIP_SIDE_CAMERA_INDEX))
+
     def _ensure_side_cap(self):
         if self.side_cap is not None and self.side_cap.isOpened():
             return self.side_cap
-        cap = cv2.VideoCapture(UPPER_LIP_SIDE_CAMERA_INDEX, cv2.CAP_DSHOW)
+        camera_index = self._side_camera_index()
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
-            print(f"[UpperLip Side] Cannot open camera {UPPER_LIP_SIDE_CAMERA_INDEX}")
+            print(f"[UpperLip Side] Cannot open camera {camera_index}")
             return None
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, SIDE_CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, SIDE_CAMERA_HEIGHT)
         self.side_cap = cap
         self._owns_side_cap = True
-        print(f"[UpperLip Side] Camera {UPPER_LIP_SIDE_CAMERA_INDEX} opened")
+        print(f"[UpperLip Side] Camera {camera_index} opened")
         return self.side_cap
 
     def collect_upper_lip_side_samples(self, n_frames: int = SIDE_SAMPLE_FRAMES, trim: int = SIDE_SAMPLE_TRIM):
@@ -65,7 +68,7 @@ class LipSideSamplingMixin:
 
         baseline = self.scorer.upper_lip_baseline or {}
         roi = baseline.get("side_roi", UPPER_LIP_SIDE_ROI)
-        side_window = f"Side Camera {UPPER_LIP_SIDE_CAMERA_INDEX} - Upper Lip"
+        side_window = f"Side Camera {self._side_camera_index()} - Upper Lip"
         samples = []
         collected = 0
         while collected < n_frames:
@@ -129,7 +132,7 @@ class LipSideSamplingMixin:
         x1, y1, x2, y2 = [int(value) for value in roi]
         self._draw_hud_panel(frame, SIDE_HUD_PANEL_TOP_LEFT, SIDE_HUD_PANEL_BOTTOM_RIGHT)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 80, 255), 2)
-        cv2.putText(frame, f"Side cam {UPPER_LIP_SIDE_CAMERA_INDEX} UpperLip ROI",
+        cv2.putText(frame, f"Side cam {self._side_camera_index()} UpperLip ROI",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(frame, f"ROI=[{x1},{y1},{x2},{y2}]  Dir={UPPER_LIP_SIDE_FACE_DIRECTION}  VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL}",
                     (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
@@ -207,7 +210,7 @@ class LipSideSamplingMixin:
 
         baseline = self.scorer.lower_lip_baseline or {}
         roi = baseline.get("side_roi", LOWER_LIP_SIDE_ROI)
-        side_window = f"Side Camera {LOWER_LIP_SIDE_CAMERA_INDEX} - Lips"
+        side_window = f"Side Camera {self._side_camera_index()} - Lips"
         samples = []
         collected = 0
         while collected < n_frames:
@@ -271,7 +274,7 @@ class LipSideSamplingMixin:
         x1, y1, x2, y2 = [int(value) for value in roi]
         self._draw_hud_panel(frame, SIDE_HUD_PANEL_TOP_LEFT, SIDE_HUD_PANEL_BOTTOM_RIGHT)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 80, 80), 2)
-        cv2.putText(frame, f"Side cam {LOWER_LIP_SIDE_CAMERA_INDEX} LowerLip ROI",
+        cv2.putText(frame, f"Side cam {self._side_camera_index()} LowerLip ROI",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(frame, f"ROI=[{x1},{y1},{x2},{y2}]  Dir={LOWER_LIP_SIDE_FACE_DIRECTION}  VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL}",
                     (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)

@@ -163,7 +163,7 @@ class FaceCalibrationWidget(QWidget):
                 return
             try:
                 # 创建UARTDevice实例并打开串口
-                self.uart_device = UARTDevice(self.serial_port, 115200)
+                self.uart_device = UARTDevice(self.serial_port, 115200, auto_open=True)
                 # 校验串口是否真的打开（检查serial.Serial实例）
                 if self.uart_device.ser and self.uart_device.ser.is_open:
                     self.serial_opened = True

@@ -30,10 +30,11 @@ class FaceController():
 
     def open(self):
         try:
-            self.interface.open()
+            return self.interface.open()
         except Exception as e:
             print(e)
             print('Error: cannot connect to serial port')
+            return False
     
     def close(self):
         try:
@@ -76,11 +77,15 @@ class FaceController():
 
     def set_servo_angle_time_32(self, _angle, _index, _time,servo_num = None):
         cmd = self.data2cmd_32(_angle, _index, 200,servo_num)
+        if not self.interface.is_open():
+            print('Error: skip servo command because serial port is not open')
+            return False
         self.interface.send_command(cmd)
         # 将bytes转换为十六进制字符串格式打印
         # print("send cmd: " + cmd.hex())  # 或者使用 str(cmd)
         import time
         time.sleep(0.03)
+        return True
     
     def data_restart(self, _data, _index):
         angles = []

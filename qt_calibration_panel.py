@@ -8,8 +8,9 @@ import cv2
 import numpy as np
 
 from eye_constants import (
+    CAMERA_INDEX,
+    DEFAULT_SERVO_CONFIG_FILE,
     LOWER_LIP_SIDE_A_DELTA,
-    LOWER_LIP_SIDE_CAMERA_INDEX,
     LOWER_LIP_SIDE_FACE_DIRECTION,
     LOWER_LIP_SIDE_FLIP_VERTICAL,
     LOWER_LIP_SIDE_MIN_AREA,
@@ -92,7 +93,7 @@ from eye_auto_tuner import EyeAutoTuner
 from utility import read_yaml, write_yaml
 
 
-DEFAULT_SERVO_CONFIG = "29_servo_config(13).yaml"
+DEFAULT_SERVO_CONFIG = DEFAULT_SERVO_CONFIG_FILE
 DEFAULT_ROUTE_MAX_ITERATIONS = 100
 FALLBACK_ROUTE_MAX_ITERATIONS = 50
 MAX_ROUTE_ITERATIONS = 500
@@ -115,6 +116,7 @@ SIDE_ROI_SELECT_POS = (10, 274)
 SIDE_UPPER_STATUS_Y = 28
 SIDE_LOWER_STATUS_Y = 146
 BASELINE_BUTTON_COLUMNS = 2
+CAMERA_CHOICES = list(range(10))
 
 LIP_TARGET_UPPER = "upper"
 LIP_TARGET_LOWER = "lower"
@@ -140,9 +142,17 @@ class DetectorThread(QThread):
     route_finished = Signal(str, bool)
     item_result = Signal(str, str)
 
-    def __init__(self, template_getter: Callable[[], str], parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        template_getter: Callable[[], str],
+        front_camera_index: int = CAMERA_INDEX,
+        side_camera_index: int = UPPER_LIP_SIDE_CAMERA_INDEX,
+        parent: Optional[QWidget] = None,
+    ) -> None:
         super().__init__(parent)
         self.template_getter = template_getter
+        self.front_camera_index = int(front_camera_index)
+        self.side_camera_index = int(side_camera_index)
         self.commands: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._running = True
         self._route_running = False
@@ -150,7 +160,7 @@ class DetectorThread(QThread):
         self.detector = None
         self._last_servo_temp_degrees = None
         self.side_cap = None
-        self.side_window_name = f"Side Camera {UPPER_LIP_SIDE_CAMERA_INDEX} - Lips"
+        self.side_window_name = self._side_window_name()
         self._upper_side_runtime_roi = None
         self._lower_side_runtime_roi = None
         self._side_roi_select_enabled = False
@@ -160,7 +170,7 @@ class DetectorThread(QThread):
         self._side_roi_current = None
 
     def _create_tuner(self, use_servo: bool) -> Optional[EyeAutoTuner]:
-        """按需创建 tuner；只有 use_servo=True 时才打开串口。"""
+        """按需创建 tuner；use_servo=True 时打开串口并保持到 cleanup。"""
         tuner = None
         try:
             tuner = EyeAutoTuner(
@@ -169,10 +179,15 @@ class DetectorThread(QThread):
             )
             tuner.side_cap = self.side_cap
             tuner._owns_side_cap = False
+            tuner.side_camera_index = self.side_camera_index
             if use_servo:
                 tuner.initialize()
                 self._restore_tuner_temp_degrees(tuner)
-                self.log.emit("Servo controller opened for current operation.")
+                if not tuner.open_serial():
+                    self.log.emit(f"[ERROR] Cannot open servo serial port: {tuner.port}")
+                    tuner.cleanup()
+                    return None
+                self.log.emit(f"Servo serial opened: {tuner.port}. It will stay open until the route finishes.")
             else:
                 tuner.scorer = self.detector
                 tuner._owns_scorer = False
@@ -201,7 +216,7 @@ class DetectorThread(QThread):
         self._remember_tuner_temp_degrees(tuner)
         tuner.cleanup()
         if had_controller:
-            self.log.emit("Servo controller released.")
+            self.log.emit("Servo controller cleaned up. Serial port closed.")
 
     def _reload_template_baselines(self) -> None:
         if self.detector is None:
@@ -247,10 +262,10 @@ class DetectorThread(QThread):
             self._shutdown_detector()
 
     def _start_detector(self) -> None:
-        self.detector = EllSegDetector()
+        self.detector = EllSegDetector(camera_index=self.front_camera_index)
         actual_w = int(self.detector.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.detector.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.log.emit(f"Camera opened: {actual_w}x{actual_h}")
+        self.log.emit(f"Front camera opened: cam{self.front_camera_index} {actual_w}x{actual_h}")
         self.detector.enable_mp = True
         self.detector.enable_ellseg = True
         self.detector.start_display()
@@ -285,9 +300,10 @@ class DetectorThread(QThread):
     def _open_side_camera(self) -> bool:
         if self.side_cap is not None and self.side_cap.isOpened():
             return True
-        cap = cv2.VideoCapture(UPPER_LIP_SIDE_CAMERA_INDEX, cv2.CAP_DSHOW)
+        self.side_window_name = self._side_window_name()
+        cap = cv2.VideoCapture(self.side_camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
-            self.log.emit(f"[WARN] Side camera {UPPER_LIP_SIDE_CAMERA_INDEX} failed to open.")
+            self.log.emit(f"[WARN] Side camera {self.side_camera_index} failed to open.")
             return False
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_FRAME_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_FRAME_HEIGHT)
@@ -297,8 +313,11 @@ class DetectorThread(QThread):
         cv2.setMouseCallback(self.side_window_name, self._on_side_mouse)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.log.emit(f"Side camera opened: cam{UPPER_LIP_SIDE_CAMERA_INDEX} {w}x{h}")
+        self.log.emit(f"Side camera opened: cam{self.side_camera_index} {w}x{h}")
         return True
+
+    def _side_window_name(self) -> str:
+        return f"Side Camera {self.side_camera_index} - Lips"
 
     def _close_side_camera(self) -> None:
         if self.side_cap is not None:
@@ -322,7 +341,7 @@ class DetectorThread(QThread):
                 SIDE_READ_FAIL_FILL,
                 dtype=np.uint8,
             )
-            cv2.putText(frame, f"Side camera {UPPER_LIP_SIDE_CAMERA_INDEX}: read failed",
+            cv2.putText(frame, f"Side camera {self.side_camera_index}: read failed",
                         (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
             cv2.imshow(self.side_window_name, frame)
             self._pump_cv_events()
@@ -360,7 +379,7 @@ class DetectorThread(QThread):
             "side_lower_tip", LOWER_LIP_SIDE_X_TOLERANCE, LOWER_LIP_SIDE_Y_TOLERANCE,
             (255, 80, 80), (255, 0, 180), SIDE_LOWER_STATUS_Y,
         )
-        cv2.putText(frame, f"Side cam {UPPER_LIP_SIDE_CAMERA_INDEX} Lips",
+        cv2.putText(frame, f"Side cam {self.side_camera_index} Lips",
                     SIDE_TITLE_POS, cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(frame, f"Dir={UPPER_LIP_SIDE_FACE_DIRECTION}  VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL}",
                     SIDE_META_POS, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 1, cv2.LINE_AA)
@@ -556,6 +575,8 @@ class DetectorThread(QThread):
             "toggle_landmarks": lambda _payload: self._toggle_detector_flag("show_all_landmarks", "Landmarks"),
             "toggle_overlay": lambda _payload: self._toggle_detector_flag("show_baseline_overlay", "Baseline overlay"),
             "toggle_eyeline": lambda _payload: self._toggle_detector_flag("show_eye_line_offset", "EyeLine HUD"),
+            "set_front_camera": self._handle_front_camera_command,
+            "set_side_camera": self._handle_side_camera_command,
             "eyelid_open": lambda _payload: self._handle_manual_eyelid("eyelid_open"),
             "eyelid_close": lambda _payload: self._handle_manual_eyelid("eyelid_close"),
             "check_upper_lip_front_side": lambda _payload: self._check_upper_lip_front_side(),
@@ -579,6 +600,36 @@ class DetectorThread(QThread):
         _ok, msg = apply_template(template_name)
         self.log.emit(msg)
         self._reload_template_baselines()
+
+    def _handle_front_camera_command(self, camera_index: int) -> None:
+        camera_index = int(camera_index)
+        if camera_index == self.front_camera_index:
+            return
+        if self._route_running:
+            self.log.emit("[WARN] Front camera switch ignored while route is running.")
+            return
+        old_detector = self.detector
+        self.detector = None
+        if old_detector is not None:
+            old_detector.stop_display()
+            old_detector.close()
+        self.front_camera_index = camera_index
+        self._start_detector()
+        self._reload_template_baselines()
+        self.log.emit(f"Front camera switched to cam{self.front_camera_index}")
+
+    def _handle_side_camera_command(self, camera_index: int) -> None:
+        camera_index = int(camera_index)
+        if camera_index == self.side_camera_index:
+            return
+        if self._route_running:
+            self.log.emit("[WARN] Side camera switch ignored while route is running.")
+            return
+        self._close_side_camera()
+        self.side_camera_index = camera_index
+        self.side_window_name = self._side_window_name()
+        if self._open_side_camera():
+            self.log.emit(f"Side camera switched to cam{self.side_camera_index}")
 
     def _toggle_detector_flag(self, attribute_name: str, label: str) -> None:
         current_value = bool(getattr(self.detector, attribute_name))
@@ -756,7 +807,7 @@ class DetectorThread(QThread):
             if tuner is None:
                 self.log.emit("[ERROR] Servo controller not available.")
                 return
-            self.log.emit("Servo controller is occupied by current route.")
+            self.log.emit("Servo route is running; serial port stays open for this route.")
             self._run_route_steps(route, tuner, max_iterations)
         except Exception as exc:
             self.log.emit(f"[Route Error] {exc}")
@@ -1012,6 +1063,8 @@ class CalibrationPanel(QMainWindow):
         self.setWindowTitle("Face Calibration Panel")
         self.resize(920, 640)
         self.detector_thread = None
+        self.front_camera_index = CAMERA_INDEX
+        self.side_camera_index = UPPER_LIP_SIDE_CAMERA_INDEX
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1027,6 +1080,16 @@ class CalibrationPanel(QMainWindow):
         save_template_btn = QPushButton("保存当前模板")
         save_template_btn.clicked.connect(self.save_current_template)
         top.addWidget(save_template_btn)
+
+        top.addWidget(QLabel("正面摄像机"))
+        self.front_camera_combo = self._camera_combo(self.front_camera_index)
+        self.front_camera_combo.currentIndexChanged.connect(self.on_front_camera_changed)
+        top.addWidget(self.front_camera_combo)
+
+        top.addWidget(QLabel("侧面摄像机"))
+        self.side_camera_combo = self._camera_combo(self.side_camera_index)
+        self.side_camera_combo.currentIndexChanged.connect(self.on_side_camera_changed)
+        top.addWidget(self.side_camera_combo)
 
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1119,6 +1182,29 @@ class CalibrationPanel(QMainWindow):
         button.clicked.connect(lambda _checked=False, command=command: self.send_detector(command))
         return button
 
+    def _camera_combo(self, current_index: int) -> QComboBox:
+        combo = QComboBox()
+        for camera_index in CAMERA_CHOICES:
+            combo.addItem(f"cam{camera_index}", camera_index)
+        idx = combo.findData(int(current_index))
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        return combo
+
+    def on_front_camera_changed(self) -> None:
+        camera_index = int(self.front_camera_combo.currentData())
+        self.front_camera_index = camera_index
+        self.append_log(f"Front camera selected: cam{camera_index}")
+        if self.detector_thread is not None:
+            self.detector_thread.send(("set_front_camera", camera_index))
+
+    def on_side_camera_changed(self) -> None:
+        camera_index = int(self.side_camera_combo.currentData())
+        self.side_camera_index = camera_index
+        self.append_log(f"Side camera selected: cam{camera_index}")
+        if self.detector_thread is not None:
+            self.detector_thread.send(("set_side_camera", camera_index))
+
     def set_result_status(self, item: str, text: str) -> None:
         key = self.ITEM_KEYS.get(item, item)
         label = self.result_labels.get(key)
@@ -1188,7 +1274,11 @@ class CalibrationPanel(QMainWindow):
             return
         _ok, msg = apply_template(self.current_template())
         self.append_log(msg)
-        self.detector_thread = DetectorThread(self.current_template)
+        self.detector_thread = DetectorThread(
+            self.current_template,
+            front_camera_index=self.front_camera_index,
+            side_camera_index=self.side_camera_index,
+        )
         self.detector_thread.log.connect(self.append_log)
         self.detector_thread.status.connect(self.set_status)
         self.detector_thread.stopped.connect(self.on_detector_stopped)

@@ -36,6 +36,8 @@ BASELINE_SECTIONS = (
 DEFAULT_TEMPLATE_NAME = "default"
 DEFAULT_FRAME_WIDTH = 1920
 DEFAULT_FRAME_HEIGHT = 1080
+EYE_LR_BASIS_KEY = "eye_lr_basis"
+EYE_LR_BASIS_MARKED = "marked"
 
 
 def _empty_template_data() -> dict[str, dict[str, Any]]:
@@ -260,10 +262,20 @@ def save_current_as_template(template_name: str) -> bool:
 
 
 def _load_common_baseline() -> Optional[dict[str, Any]]:
-    common = load_face_point_data().get("common", {})
+    data = load_face_point_data()
+    common = data.get("common", {})
     if not common:
         return None
     try:
+        if (
+            common.get(EYE_LR_BASIS_KEY) != EYE_LR_BASIS_MARKED
+            and "iris_left" in common
+            and "iris_right" in common
+        ):
+            common["iris_left"], common["iris_right"] = common["iris_right"], common["iris_left"]
+            common[EYE_LR_BASIS_KEY] = EYE_LR_BASIS_MARKED
+            save_face_point_data(data)
+            print("[FacePoint] Migrated eye L/R basis to marked-left/marked-right.")
         return {
             "nose": tuple(common["nose"]),
             "iris_left": tuple(common["iris_left"]),
@@ -282,7 +294,9 @@ def _load_common_baseline() -> Optional[dict[str, Any]]:
 
 def _save_common_baseline(common: dict[str, Any]) -> None:
     data = load_face_point_data()
-    data["common"] = common
+    current = data.get("common", {})
+    data["common"] = current if isinstance(current, dict) else {}
+    data["common"].update(common)
     save_face_point_data(data)
 
 
@@ -291,6 +305,9 @@ def _load_template_section(section: str, template_name: Optional[str] = None) ->
         template_name = get_active_template()
     data = load_face_point_data()
     value = data["templates"].get(template_name, {}).get(section, {})
+    if isinstance(value, dict) and _migrate_section_lr_to_marked(section, value):
+        save_face_point_data(data)
+        print(f"[FacePoint] Migrated {section} L/R basis to marked-left/marked-right.")
     return value.copy() if isinstance(value, dict) and value else None
 
 
@@ -301,6 +318,28 @@ def _save_template_section(section: str, value: dict[str, Any], template_name: O
     data["templates"].setdefault(template_name, _empty_template_data())
     data["templates"][template_name][section] = value
     save_face_point_data(data)
+
+
+def _migrate_section_lr_to_marked(section: str, value: dict[str, Any]) -> bool:
+    if value.get(EYE_LR_BASIS_KEY) == EYE_LR_BASIS_MARKED:
+        return False
+    if section == "eyelid":
+        pairs = [("left_ear", "right_ear")]
+    elif section == "eyebrow":
+        pairs = [
+            ("left_slope", "right_slope"),
+            ("left_brow_iris_gap", "right_brow_iris_gap"),
+        ]
+    else:
+        return False
+    changed = False
+    for left_key, right_key in pairs:
+        if left_key in value and right_key in value:
+            value[left_key], value[right_key] = value[right_key], value[left_key]
+            changed = True
+    if changed:
+        value[EYE_LR_BASIS_KEY] = EYE_LR_BASIS_MARKED
+    return changed
 
 
 def template_section_exists(template_name: str, section: str) -> bool:
@@ -316,6 +355,7 @@ def save_baseline(nose_pos: tuple[float, float], left_iris_pos: tuple[float, flo
         "iris_left": list(left_iris_pos),
         "iris_right": list(right_iris_pos),
         "eye_line_y": eye_line_y,
+        EYE_LR_BASIS_KEY: EYE_LR_BASIS_MARKED,
     }
     if filepath is not None:
         _write_json_file(filepath, data)
@@ -351,6 +391,7 @@ def save_eyelid_baseline(left_ear: float, right_ear: float, filepath: Optional[s
     data = {
         "left_ear": float(left_ear),
         "right_ear": float(right_ear),
+        EYE_LR_BASIS_KEY: EYE_LR_BASIS_MARKED,
     }
     if filepath is not None:
         _write_json_file(filepath, data)
@@ -384,6 +425,7 @@ def save_eyebrow_baseline(metrics: dict[str, Any], filepath: Optional[str] = Non
     ):
         if key in metrics:
             data[key] = float(metrics[key])
+    data[EYE_LR_BASIS_KEY] = EYE_LR_BASIS_MARKED
     if filepath is not None:
         _write_json_file(filepath, data)
     else:

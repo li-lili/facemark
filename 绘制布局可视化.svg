@@ -45,7 +45,7 @@
   <text class="small" x="112" y="80">通过提示 (100,80)</text>
 
   <!-- right side panel -->
-  <rect class="panel" x="1470" y="36" width="430" height="490"/>
+  <rect class="panel" x="1470" y="36" width="430" height="510"/>
   <text class="text" x="1490" y="66">右侧常驻参数栏</text>
 
   <rect x="1486" y="76" width="390" height="54" rx="6" fill="#102633" stroke="#36a3ff"/>
@@ -73,6 +73,7 @@
   <text class="tiny" x="1500" y="446">(1490,412/430) mp0 / EyeLine</text>
   <text class="tiny" x="1500" y="466">(1490,448/464) ULSide tol / cam+roi</text>
   <text class="tiny" x="1500" y="486">(1490,482/498) LLSide tol / cam+roi</text>
+  <text class="tiny" x="1500" y="506">(1490,516) FrontCam HFlip / VFlip</text>
 
   <!-- bottom info -->
   <rect class="panel" x="8" y="1040" width="360" height="32"/>

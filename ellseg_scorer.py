@@ -263,10 +263,12 @@ class EllSegDetector:
     """
 
     def __init__(self, camera_index=0, width=1920, height=1080,
-                 flip_horizontal=True, stabilize_frames=8):
+                 flip_horizontal=False, flip_vertical=False,
+                 stabilize_frames=8):
         self.width = width
         self.height = height
-        self.flip_horizontal = flip_horizontal
+        self.flip_horizontal = False
+        self.flip_vertical = False
         self.stabilize_frames = stabilize_frames
 
         # 检测模块开关
@@ -698,6 +700,9 @@ class EllSegDetector:
                 cv2.putText(img,
                            f"LLSide cam={LOWER_LIP_SIDE_CAMERA_INDEX} VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL} roi=[{lower_roi[0]},{lower_roi[1]},{lower_roi[2]},{lower_roi[3]}]",
                            (x_off, 498), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           f"FrontCam HFlip={self.flip_horizontal} VFlip={self.flip_vertical}",
+                           (x_off, 516), 0, 0.35, (200, 220, 255), 1)
 
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
@@ -859,8 +864,6 @@ class EllSegDetector:
             self._cap_fps_counter = 0
             self._cap_fps_time = now
 
-        if self.flip_horizontal:
-            frame = cv2.flip(frame, 1)
         return True, frame
 
     def detect(self, frame):
@@ -905,8 +908,8 @@ class EllSegDetector:
         t_ell = 0
         if self.enable_ellseg:
             for side, eye_idx, ell_sm in [
-                ("left", LEFT_EYE_IDX, self.ell_smooth_L),
-                ("right", RIGHT_EYE_IDX, self.ell_smooth_R),
+                ("right", LEFT_EYE_IDX, self.ell_smooth_R),
+                ("left", RIGHT_EYE_IDX, self.ell_smooth_L),
             ]:
                 crop, (x1, y1) = crop_eye(frame, lms_smooth, eye_idx)
                 if crop.size == 0:
@@ -1096,9 +1099,9 @@ class EllSegDetector:
         )
         return {
             "left": EllSegDetector._calc_ear(
-                lms_smooth, LEFT_EAR_PAIRS, LEFT_EYE_CORNERS),
-            "right": EllSegDetector._calc_ear(
                 lms_smooth, RIGHT_EAR_PAIRS, RIGHT_EYE_CORNERS),
+            "right": EllSegDetector._calc_ear(
+                lms_smooth, LEFT_EAR_PAIRS, LEFT_EYE_CORNERS),
         }
 
     @staticmethod
@@ -1159,11 +1162,11 @@ class EllSegDetector:
 
         return {
             "left": normalized_gap(
-                LEFT_BROW_IRIS_POINTS, LEFT_BROW_IRIS_WEIGHTS,
-                LEFT_IRIS_CENTER, LEFT_BROW_CORNERS),
-            "right": normalized_gap(
                 RIGHT_BROW_IRIS_POINTS, RIGHT_BROW_IRIS_WEIGHTS,
                 RIGHT_IRIS_CENTER, RIGHT_BROW_CORNERS),
+            "right": normalized_gap(
+                LEFT_BROW_IRIS_POINTS, LEFT_BROW_IRIS_WEIGHTS,
+                LEFT_IRIS_CENTER, LEFT_BROW_CORNERS),
         }
 
     @staticmethod
@@ -1174,9 +1177,9 @@ class EllSegDetector:
             RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS,
         )
         left = EllSegDetector._calc_brow_geometry(
-            lms_smooth, LEFT_BROW_POINTS, LEFT_BROW_CORNERS)
-        right = EllSegDetector._calc_brow_geometry(
             lms_smooth, RIGHT_BROW_POINTS, RIGHT_BROW_CORNERS)
+        right = EllSegDetector._calc_brow_geometry(
+            lms_smooth, LEFT_BROW_POINTS, LEFT_BROW_CORNERS)
         brow_iris_gaps = EllSegDetector._calc_brow_iris_gaps(lms_smooth)
         return {
             "left_slope": left["slope"],

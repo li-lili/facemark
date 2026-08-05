@@ -75,7 +75,7 @@
 │  ├── landmarker: MediaPipe FaceLandmarker (VIDEO mode)               │
 │  ├── ellseg_model: RitNet_V3 (GPU/CPU EllSeg 虹膜分割)              │
 │  │                                                                    │
-│  ├── capture()      → cv2.read + flip_horizontal                     │
+│  ├── capture()      → cv2.read 原始正面帧                             │
 │  ├── detect(frame)  → MP关键点(EMA平滑) + EllSeg椭圆(EMA平滑) + 偏移 │
 │  │                                                                    │
 │  ├── get_guide_signal()      → {L/R_dX,dY,dist,adj_X,adj_Y}        │

@@ -31,7 +31,7 @@ from eye_constants import (
     EYEBROW_BIG_SYMMETRY_TOLERANCE,
     EYEBROW_WAIT_SECONDS, EYEBROW_MAX_ITERATIONS,
     DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX,
-    CAMERA_INDEX, FLIP_HORIZONTAL,
+    CAMERA_INDEX, DEFAULT_SERVO_CONFIG_FILE, FLIP_HORIZONTAL, FLIP_VERTICAL,
     EYELID_EAR_TOLERANCE, EYELID_WAIT_SECONDS, EYELID_MAX_ITERATIONS,
     MOUTH_MAR_TOLERANCE, MOUTH_WAIT_SECONDS, MOUTH_MAX_ITERATIONS,
     MOUTH_CHIN_CHANNEL,
@@ -69,7 +69,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
     def __init__(
         self,
-        yaml_file: str = "29_servo_config(13).yaml",
+        yaml_file: str = DEFAULT_SERVO_CONFIG_FILE,
         port: str = "COM5",
         baudrate: int = 115200,
         servo_num: int = 27,
@@ -119,7 +119,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
         print("\n[1/2] 初始化舵机控制器...")
         interface = UARTDevice(self.port, self.baudrate)
         self.controller = FaceController(interface, self.servo_num, self.yaml_file)
-        self.controller.open()
         self.controller.init_data()
 
         # 计算每个眼睛舵机的范围
@@ -156,6 +155,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
                 width=1920,
                 height=1080,
                 flip_horizontal=FLIP_HORIZONTAL,
+                flip_vertical=FLIP_VERTICAL,
                 stabilize_frames=self.stabilize_frames,
             )
             self._owns_scorer = True
@@ -168,25 +168,63 @@ class EyeAutoTuner(LipSideSamplingMixin):
     # 舵机操作
     # ==================================================================
 
+    def open_serial(self) -> bool:
+        if self.controller is None:
+            print("[SERVO][FAIL] controller is not initialized")
+            return False
+        ok = self.controller.open()
+        if ok:
+            print(f"[SERVO] opened {self.port}")
+        else:
+            print(f"[SERVO][FAIL] cannot open {self.port}")
+        return bool(ok)
+
+    def close_serial(self) -> None:
+        if self.controller is None:
+            return
+        self.controller.close()
+        print(f"[SERVO] closed {self.port}")
+
     def send_servo(self, channel: int, angle: int,
-                   angle_range: Tuple[int, int] = None):
+                   angle_range: Tuple[int, int] = None) -> bool:
         """发送单个舵机角度，自动 clamp 到范围，并同步当前内存角度。"""
         if angle_range:
             angle = max(angle_range[0], min(angle_range[1], angle))
-        self.controller.set_servo_angle_time_32(
+        ok = self.controller.set_servo_angle_time_32(
             [angle], [channel], 200, servo_num=self.controller.servo_num
         )
+        if not ok:
+            print(f"[SERVO][FAIL] A{channel}={angle} port={self.port}")
+            return False
         # 记录已发送角度，避免下一次 UI 手动/自动动作又从 YAML temp_deg 起步。
         if 0 <= channel < len(self.controller.list_temp_deg):
             self.controller.list_temp_deg[channel] = angle
+        print(f"[SERVO][OK] A{channel}={angle} port={self.port}")
+        return True
 
     def send_servos(self, channels: List[int], angles: List[int],
-                    angle_ranges: List[Tuple[int, int]] = None):
+                    angle_ranges: List[Tuple[int, int]] = None) -> bool:
         """发送多个舵机角度"""
-        for ch, ang in zip(channels, angles):
-            idx = channels.index(ch) if angle_ranges else None
-            ar = angle_ranges[idx] if (angle_ranges and idx is not None) else None
-            self.send_servo(ch, ang, ar)
+        clamped_angles = []
+        for idx, (ch, ang) in enumerate(zip(channels, angles)):
+            ar = angle_ranges[idx] if angle_ranges else None
+            if ar:
+                ang = max(ar[0], min(ar[1], ang))
+            clamped_angles.append(ang)
+
+        ok = self.controller.set_servo_angle_time_32(
+            clamped_angles, channels, 200, servo_num=self.controller.servo_num
+        )
+        items = " ".join(f"A{ch}={ang}" for ch, ang in zip(channels, clamped_angles))
+        if not ok:
+            print(f"[SERVO][FAIL] {items} port={self.port}")
+            return False
+
+        for ch, ang in zip(channels, clamped_angles):
+            if 0 <= ch < len(self.controller.list_temp_deg):
+                self.controller.list_temp_deg[ch] = ang
+        print(f"[SERVO][OK] {items} port={self.port}")
+        return True
 
     def capture_and_score(self):
         """等待舵机稳定后采集检测（EllSeg 虹膜偏移）"""
@@ -343,6 +381,8 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
         iteration = 0
         sleep_chunk = 0.1
+        l_x_locked = False
+        r_x_locked = False
 
         try:
             while iteration < max_iterations:
@@ -384,7 +424,9 @@ class EyeAutoTuner(LipSideSamplingMixin):
                 # ---- 步骤 3: 已关闭 MP/EllSeg (collect_guide_samples 已关) ----
 
                 # ---- 步骤 4: 检查是否已合格 ----
-                qualified = (l_dist <= TOLERANCE and r_dist <= TOLERANCE)
+                l_qualified = l_dist <= TOLERANCE
+                r_qualified = r_dist <= TOLERANCE
+                qualified = (l_qualified and r_qualified)
 
                 dist_s = f"L={l_dist:.1f}px R={r_dist:.1f}px"
                 print(f"  [Iter {iteration:3d}] 平均偏移: {dist_s} | "
@@ -413,16 +455,38 @@ class EyeAutoTuner(LipSideSamplingMixin):
                 r_adj_x = avg_signal["R_adj_X"]
                 l_adj_y = avg_signal["L_adj_Y"]
                 r_adj_y = avg_signal["R_adj_Y"]
+                if l_qualified:
+                    l_adj_x = 0.0
+                    l_adj_y = 0.0
+                if r_qualified:
+                    r_adj_x = 0.0
+                    r_adj_y = 0.0
+                if abs(l_dx) <= TOLERANCE:
+                    l_x_locked = True
+                if abs(r_dx) <= TOLERANCE:
+                    r_x_locked = True
+                if l_x_locked:
+                    l_adj_x = 0.0
+                if abs(l_dy) <= TOLERANCE:
+                    l_adj_y = 0.0
+                if r_x_locked:
+                    r_adj_x = 0.0
+                if abs(r_dy) <= TOLERANCE:
+                    r_adj_y = 0.0
 
                 # A10: L_vertical 上下 (减=下)  |  A11: R_vertical 上下 (减=下, 物理反向)
-                # A12: L_horizontal 内外 (减=外) |  A13: R_horizontal 内外 (减=外, 物理反向)
+                # A12/A13: 水平方向按 raw dX 直接映射，只改舵机动作，不改 raw dx/dy。
+                # L dX+ -> A12+, L dX- -> A12-; R dX+ -> A13+, R dX- -> A13-.
                 adj_map = {
                     EYEBALL_CHANNELS[0]:  1.0 if l_adj_y < 0 else (-1.0 if l_adj_y > 0 else 0.0),
                     EYEBALL_CHANNELS[1]: -1.0 if r_adj_y < 0 else ( 1.0 if r_adj_y > 0 else 0.0),
-                    EYEBALL_CHANNELS[2]: -1.0 if l_adj_x < 0 else ( 1.0 if l_adj_x > 0 else 0.0),
-                    EYEBALL_CHANNELS[3]: -1.0 if r_adj_x < 0 else ( 1.0 if r_adj_x > 0 else 0.0),
+                    EYEBALL_CHANNELS[2]:  1.0 if l_adj_x < 0 else (-1.0 if l_adj_x > 0 else 0.0),
+                    EYEBALL_CHANNELS[3]:  1.0 if r_adj_x < 0 else (-1.0 if r_adj_x > 0 else 0.0),
                 }
 
+                move_channels = []
+                move_angles = []
+                move_ranges = []
                 moved = []
                 for idx, ch in enumerate(EYEBALL_CHANNELS):
                     delta = adj_map[ch]
@@ -431,9 +495,17 @@ class EyeAutoTuner(LipSideSamplingMixin):
                     new_angle = round(current_angles[ch] + delta)
                     lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
                     new_angle = max(lo, min(hi, new_angle))
-                    self.send_servo(ch, new_angle, (lo, hi))
-                    current_angles[ch] = new_angle
+                    move_channels.append(ch)
+                    move_angles.append(new_angle)
+                    move_ranges.append((lo, hi))
                     moved.append(f"{EYEBALL_NAMES[idx]}={new_angle}°(Δ{delta:+.1f})")
+
+                if moved:
+                    sent = self.send_servos(move_channels, move_angles, move_ranges)
+                    if sent:
+                        for ch, angle in zip(move_channels, move_angles):
+                            current_angles[ch] = angle
+                    print(f"  [Iter {iteration:3d}] Eyeball serial sent={sent}")
 
                 if not moved:
                     print(f"  [Iter {iteration:3d}] 无需移动 (偏移为0)")

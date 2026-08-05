@@ -5,8 +5,51 @@ Eye Auto Tuner — 常量定义与数据类型
 以及调优结果数据结构。
 """
 
+import os
+import json
 from dataclasses import dataclass, field
 from typing import Dict, List
+
+
+DEFAULT_SERVO_CONFIG_FILE = "29_servo_config(13).yaml"
+FACE_POINT_FILE = "face_point.json"
+CAMERA_CONFIG_KEY = "camera_config"
+
+
+def _get_nested_dict(data: dict, *keys: str) -> dict:
+    cur = data
+    for key in keys:
+        if not isinstance(cur, dict):
+            return {}
+        cur = cur.get(key, {})
+    return cur if isinstance(cur, dict) else {}
+
+
+def _load_camera_config() -> dict:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), FACE_POINT_FILE)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = json.load(f) or {}
+    except Exception as exc:
+        print(f"[WARN] Camera config fallback: cannot read {path}: {exc}")
+        return {}
+
+    common_config = _get_nested_dict(config, "common", CAMERA_CONFIG_KEY)
+    if common_config:
+        return common_config
+    top_config = _get_nested_dict(config, CAMERA_CONFIG_KEY)
+    return top_config
+
+
+_CAMERA_CONFIG = _load_camera_config()
+
+
+def _camera_config_int(key: str, default: int) -> int:
+    try:
+        return int(_CAMERA_CONFIG.get(key, default))
+    except (TypeError, ValueError):
+        print(f"[WARN] Invalid face_point.{CAMERA_CONFIG_KEY}.{key}, fallback to {default}")
+        return int(default)
 
 
 # ============================================================
@@ -90,7 +133,7 @@ LOWER_LIP_MAX_ITERATIONS = 100
 LOWER_LIP_CHANNEL = 19               # A19 下嘴唇正面: 上(210) - 下(135)
 LOWER_LIP_SIDE_CHANNEL = 18          # A18 下嘴唇侧面: 前(240) - 后(180)
 LOWER_LIP_PAIR_CHANNELS = [19, 18]   # 下嘴唇自动调整同时控制 A19/A18
-LOWER_LIP_SIDE_CAMERA_INDEX = 1
+LOWER_LIP_SIDE_CAMERA_INDEX = _camera_config_int("side_camera_index", 1)
 LOWER_LIP_SIDE_FLIP_VERTICAL = True
 LOWER_LIP_SIDE_ROI = [720, 820, 1060, 1080]
 LOWER_LIP_SIDE_FACE_DIRECTION = "right"
@@ -119,9 +162,9 @@ UPPER_LIP_CHANNEL = 16               # A16 中上嘴唇: 上(100) - 下(190)
 UPPER_LIP_SIDE_CHANNEL = 17          # A17 上嘴唇侧面辅助舵机: 前(165) - 后(200)
 UPPER_LIP_PAIR_CHANNELS = [16, 17]   # 上嘴唇自动调整同时控制 A16/A17
 
-# 侧面摄像头上唇前点参数。ROI 为摄像机 1 画面中的嘴部范围 [x1, y1, x2, y2]。
-UPPER_LIP_SIDE_CAMERA_INDEX = 1
-UPPER_LIP_SIDE_FLIP_VERTICAL = True  # 摄像机 1 侧面画面垂直翻转后再检测/显示
+# 侧面摄像头上唇前点参数。摄像机索引来自 face_point.json 的 common.camera_config。
+UPPER_LIP_SIDE_CAMERA_INDEX = _camera_config_int("side_camera_index", 1)
+UPPER_LIP_SIDE_FLIP_VERTICAL = True  # 侧面画面垂直翻转后再检测/显示
 UPPER_LIP_SIDE_ROI = [720, 820, 1060, 1080]
 UPPER_LIP_SIDE_FACE_DIRECTION = "right"
 UPPER_LIP_SIDE_X_TOLERANCE = 3.0     # 侧面上唇前点 x 像素容差
@@ -179,10 +222,11 @@ HEAD_EYE_RIGHT_IDX = 263      # 右眼外角
 # ============================================================
 # 摄像头配置
 # ============================================================
-CAMERA_INDEX = 0
+CAMERA_INDEX = _camera_config_int("front_camera_index", 0)
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
-FLIP_HORIZONTAL = True
+FLIP_HORIZONTAL = False
+FLIP_VERTICAL = False
 
 # ============================================================
 # 数据类型
