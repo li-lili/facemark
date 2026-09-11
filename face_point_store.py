@@ -31,12 +31,47 @@ BASELINE_SECTIONS = (
     "lower_lip",
     "upper_lip",
     "mouth_corners",
+    "mouth_corner_curl",
     "head_position",
+    "head_adapter",
+    "side_profile_slopes",
+    "side_nose",
+    "side_chin",
 )
 DEFAULT_TEMPLATE_NAME = "default"
 DEFAULT_FRAME_WIDTH = 1920
 DEFAULT_FRAME_HEIGHT = 1080
 EYE_LR_BASIS_KEY = "eye_lr_basis"
+
+
+def _head_position_geometry(
+    nose_px: tuple[float, float] | list[float],
+    eye_left_px: tuple[float, float] | list[float],
+    eye_right_px: tuple[float, float] | list[float],
+) -> dict[str, Any]:
+    nose = np.array(nose_px, dtype=np.float64)
+    eye_left = np.array(eye_left_px, dtype=np.float64)
+    eye_right = np.array(eye_right_px, dtype=np.float64)
+    eye_vec = eye_right - eye_left
+    eye_distance = float(np.linalg.norm(eye_vec))
+    eye_center = (eye_left + eye_right) * 0.5
+    eye_line_angle_deg = float(np.degrees(np.arctan2(eye_vec[1], eye_vec[0])))
+    if eye_line_angle_deg > 90.0:
+        eye_line_angle_deg -= 180.0
+    elif eye_line_angle_deg <= -90.0:
+        eye_line_angle_deg += 180.0
+    eye_line_slope = float(eye_vec[1] / eye_vec[0]) if abs(float(eye_vec[0])) > 1e-6 else None
+    nose_to_eye_center = nose - eye_center
+    return {
+        "eye_center": [round(float(eye_center[0]), 1), round(float(eye_center[1]), 1)],
+        "eye_distance": round(eye_distance, 1),
+        "eye_line_angle_deg": round(eye_line_angle_deg, 3),
+        "eye_line_slope": None if eye_line_slope is None else round(eye_line_slope, 6),
+        "nose_to_eye_center": [
+            round(float(nose_to_eye_center[0]), 1),
+            round(float(nose_to_eye_center[1]), 1),
+        ],
+    }
 EYE_LR_BASIS_MARKED = "marked"
 
 
@@ -169,14 +204,15 @@ def _legacy_section(section: str, path: str) -> dict[str, Any]:
                 "corner_right": list(data["corner_right"]),
             }
         if section == "head_position":
-            return {
+            out = {
                 "nose_px": list(data["nose_px"]),
                 "eye_left": list(data["eye_left"]),
                 "eye_right": list(data["eye_right"]),
                 "frame_width": data.get("frame_width", DEFAULT_FRAME_WIDTH),
                 "frame_height": data.get("frame_height", DEFAULT_FRAME_HEIGHT),
-                "eye_distance": data.get("eye_distance", 0.0),
             }
+            out.update(_head_position_geometry(out["nose_px"], out["eye_left"], out["eye_right"]))
+            return out
     except Exception as exc:
         print(f"[FacePoint] Legacy {section} migration failed: {exc}")
     return {}
@@ -330,6 +366,8 @@ def _migrate_section_lr_to_marked(section: str, value: dict[str, Any]) -> bool:
             ("left_slope", "right_slope"),
             ("left_brow_iris_gap", "right_brow_iris_gap"),
         ]
+    elif section == "mouth_corners":
+        pairs = [("corner_left", "corner_right")]
     else:
         return False
     changed = False
@@ -340,6 +378,48 @@ def _migrate_section_lr_to_marked(section: str, value: dict[str, Any]) -> bool:
     if changed:
         value[EYE_LR_BASIS_KEY] = EYE_LR_BASIS_MARKED
     return changed
+
+
+def save_side_profile_slope_baseline(
+    nose_upper_slope: float,
+    lip_chin_slope: float,
+    filepath: Optional[str] = None,
+) -> None:
+    data = {
+        "nose_upper_slope": round(float(nose_upper_slope), 6),
+        "lip_chin_slope": round(float(lip_chin_slope), 6),
+    }
+    if not all(np.isfinite(value) and value > 0.0 for value in data.values()):
+        raise ValueError("Side-profile slopes must be finite positive values")
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("side_profile_slopes", data)
+    print(
+        "[Baseline] Saved side-profile slopes: "
+        f"N-U={data['nose_upper_slope']:.6f} U-C={data['lip_chin_slope']:.6f}")
+
+
+def load_side_profile_slope_baseline(
+    filepath: Optional[str] = None,
+) -> Optional[dict[str, float]]:
+    data = (
+        _load_template_section("side_profile_slopes")
+        if filepath is None else _read_json_file(filepath)
+    )
+    if not isinstance(data, dict):
+        return None
+    try:
+        nose_upper = float(data["nose_upper_slope"])
+        lip_chin = float(data["lip_chin_slope"])
+        if not all(np.isfinite(value) and value > 0.0 for value in (nose_upper, lip_chin)):
+            return None
+        return {
+            "nose_upper_slope": nose_upper,
+            "lip_chin_slope": lip_chin,
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def template_section_exists(template_name: str, section: str) -> bool:
@@ -603,6 +683,7 @@ def save_mouth_corners_baseline(nose_pos: tuple[float, float], left_corner_pos: 
         "nose": list(nose_pos),
         "corner_left": list(left_corner_pos),
         "corner_right": list(right_corner_pos),
+        EYE_LR_BASIS_KEY: EYE_LR_BASIS_MARKED,
     }
     if filepath is not None:
         _write_json_file(filepath, data)
@@ -620,31 +701,64 @@ def load_mouth_corners_baseline(filepath: Optional[str] = None) -> Optional[dict
             "nose": tuple(data["nose"]),
             "corner_left": tuple(data["corner_left"]),
             "corner_right": tuple(data["corner_right"]),
+            EYE_LR_BASIS_KEY: data.get(EYE_LR_BASIS_KEY),
         }
     except Exception as exc:
         print(f"[MouthCorners Baseline] Load failed: {exc}")
         return None
 
 
+def save_mouth_corner_curl_baseline(left_curl: float, right_curl: float,
+                                    filepath: Optional[str] = None) -> None:
+    data = {
+        "left_curl": float(left_curl),
+        "right_curl": float(right_curl),
+    }
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("mouth_corner_curl", data)
+    print(f"[MouthCornerCurl Baseline] Saved: L={left_curl:+.4f} R={right_curl:+.4f}")
+
+
+def load_mouth_corner_curl_baseline(filepath: Optional[str] = None) -> Optional[dict[str, float]]:
+    try:
+        data = _load_template_section("mouth_corner_curl") if filepath is None else _read_json_file(filepath)
+        if not data:
+            return None
+        return {
+            "left_curl": float(data["left_curl"]),
+            "right_curl": float(data["right_curl"]),
+        }
+    except Exception as exc:
+        print(f"[MouthCornerCurl Baseline] Load failed: {exc}")
+        return None
+
+
 def save_head_position_baseline(nose_px: tuple[float, float], eye_left_px: tuple[float, float],
                                 eye_right_px: tuple[float, float], frame_width: int,
                                 frame_height: int, filepath: Optional[str] = None) -> None:
-    eye_dist = np.linalg.norm(np.array(eye_right_px, dtype=np.float64) - np.array(eye_left_px, dtype=np.float64))
     data = {
         "nose_px": list(nose_px),
         "eye_left": list(eye_left_px),
         "eye_right": list(eye_right_px),
         "frame_width": frame_width,
         "frame_height": frame_height,
-        "eye_distance": round(float(eye_dist), 1),
     }
+    data.update(_head_position_geometry(nose_px, eye_left_px, eye_right_px))
     if filepath is not None:
         _write_json_file(filepath, data)
     else:
-        _save_template_section("head_position", data)
+        template_name = get_active_template()
+        face_data = load_face_point_data()
+        face_data["templates"].setdefault(template_name, _empty_template_data())
+        face_data["templates"][template_name]["head_position"] = data
+        face_data["templates"][template_name]["head_adapter"] = {}
+        save_face_point_data(face_data)
     print(
         f"[HeadPosition Baseline] Saved: nose={nose_px} L_eye={eye_left_px} "
-        f"R_eye={eye_right_px} eye_dist={eye_dist:.1f}"
+        f"R_eye={eye_right_px} eye_dist={data['eye_distance']:.1f} "
+        f"angle={data['eye_line_angle_deg']:+.3f} slope={data['eye_line_slope']}"
     )
 
 
@@ -653,14 +767,98 @@ def load_head_position_baseline(filepath: Optional[str] = None) -> Optional[dict
         data = _load_template_section("head_position") if filepath is None else _read_json_file(filepath)
         if not data:
             return None
-        return {
+        out = {
             "nose_px": tuple(data["nose_px"]),
             "eye_left": tuple(data["eye_left"]),
             "eye_right": tuple(data["eye_right"]),
             "frame_width": data.get("frame_width", DEFAULT_FRAME_WIDTH),
             "frame_height": data.get("frame_height", DEFAULT_FRAME_HEIGHT),
-            "eye_distance": data.get("eye_distance", 0.0),
         }
+        out.update(_head_position_geometry(out["nose_px"], out["eye_left"], out["eye_right"]))
+        return out
     except Exception as exc:
         print(f"[HeadPosition Baseline] Load failed: {exc}")
         return None
+
+
+def save_head_adapter_baseline(adapter: dict[str, Any], filepath: Optional[str] = None) -> None:
+    data: dict[str, Any] = {}
+    for key in (
+        "nose_offset",
+        "eye_left_offset",
+        "eye_right_offset",
+        "eye_center_offset",
+    ):
+        if key in adapter:
+            data[key] = [round(float(value), 3) for value in adapter[key]]
+    for key in (
+        "eye_distance_offset",
+        "eye_line_angle_offset_deg",
+        "eye_line_slope_offset",
+        "point_max_offset",
+    ):
+        if key in adapter:
+            value = adapter[key]
+            data[key] = None if value is None else round(float(value), 6)
+
+    if filepath is not None:
+        _write_json_file(filepath, data)
+    else:
+        _save_template_section("head_adapter", data)
+    print(
+        "[HeadAdapter Baseline] Saved: "
+        f"N={data.get('nose_offset')} "
+        f"L={data.get('eye_left_offset')} "
+        f"R={data.get('eye_right_offset')} "
+        f"max={data.get('point_max_offset')}"
+    )
+
+
+def load_head_adapter_baseline(filepath: Optional[str] = None) -> Optional[dict[str, Any]]:
+    try:
+        data = _load_template_section("head_adapter") if filepath is None else _read_json_file(filepath)
+        if not data:
+            return None
+        out: dict[str, Any] = {}
+        for key in (
+            "nose_offset",
+            "eye_left_offset",
+            "eye_right_offset",
+            "eye_center_offset",
+        ):
+            if key in data:
+                values = data[key]
+                out[key] = (float(values[0]), float(values[1]))
+        for key in (
+            "eye_distance_offset",
+            "eye_line_angle_offset_deg",
+            "eye_line_slope_offset",
+            "point_max_offset",
+        ):
+            if key in data:
+                value = data[key]
+                out[key] = None if value is None else float(value)
+        return out if out else None
+    except Exception as exc:
+        print(f"[HeadAdapter Baseline] Load failed: {exc}")
+        return None
+
+
+def load_side_nose_roi():
+    data = _load_template_section("side_nose") or {}
+    roi = data.get("roi")
+    return list(roi) if isinstance(roi, list) and len(roi) == 4 else None
+
+
+def save_side_nose_roi(roi):
+    _save_template_section("side_nose", {"roi": [int(v) for v in roi]})
+
+
+def load_side_chin_roi():
+    data = _load_template_section("side_chin") or {}
+    roi = data.get("roi")
+    return list(roi) if isinstance(roi, list) and len(roi) == 4 else None
+
+
+def save_side_chin_roi(roi):
+    _save_template_section("side_chin", {"roi": [int(v) for v in roi]})

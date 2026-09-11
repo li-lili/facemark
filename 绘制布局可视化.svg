@@ -25,8 +25,19 @@
   <!-- camera focus area -->
   <rect x="430" y="120" width="850" height="780" rx="18" fill="#121820" stroke="#26313d" stroke-width="2" stroke-dasharray="10 8"/>
   <text class="muted" x="760" y="520">中间画面尽量留给脸部和关键点</text>
-  <path class="line" d="M920 540H1000 M960 500V580"/>
-  <text class="tiny" x="984" y="532">中心十字/头部参考线</text>
+  <text class="tiny" x="820" y="532">头位检查仅在右侧 HUD 显示三点偏差</text>
+
+  <!-- optional iris-cover calculation overlay; actual position follows each eye -->
+  <g>
+    <ellipse cx="820" cy="620" rx="72" ry="36" fill="none" stroke="#dcb400" stroke-width="2"/>
+    <path d="M748 620 Q820 692 892 620" fill="none" stroke="#ffff00" stroke-width="3"/>
+    <path d="M748 646 Q820 664 892 646" fill="none" stroke="#00ffff" stroke-width="3"/>
+    <path d="M792 672 Q820 692 848 672" fill="none" stroke="#ff3333" stroke-width="6"/>
+    <path d="M820 659V684" fill="none" stroke="#21d07a" stroke-width="4"/>
+    <text class="tiny" x="914" y="610">眼球上下贴合调整计算线（实际跟随双眼）</text>
+    <text class="tiny" x="914" y="630">暗黄=椭圆 黄=下弧 青=下眼皮</text>
+    <text class="tiny" x="914" y="650">绿=贴合 红=遮多 橙=仍有空隙</text>
+  </g>
 
   <!-- top status -->
   <rect class="ok" x="8" y="6" width="104" height="34"/>
@@ -45,39 +56,49 @@
   <text class="small" x="112" y="80">通过提示 (100,80)</text>
 
   <!-- right side panel -->
-  <rect class="panel" x="1470" y="36" width="430" height="510"/>
+  <rect class="panel" x="1470" y="30" width="430" height="758"/>
   <text class="text" x="1490" y="66">右侧常驻参数栏</text>
 
-  <rect x="1486" y="76" width="390" height="54" rx="6" fill="#102633" stroke="#36a3ff"/>
+  <rect x="1486" y="76" width="390" height="88" rx="6" fill="#102633" stroke="#36a3ff"/>
   <text class="small" x="1500" y="98">眼球偏移</text>
-  <text class="tiny" x="1500" y="116">(1490,44/62) L/R dX dY d</text>
+  <text class="tiny" x="1500" y="116">(1490,44/62) L/R target dX dY d, adapter mode shows raw</text>
+  <text class="tiny" x="1500" y="134">(1490,80) IrisY L/R: Top=0%, Bottom=100%</text>
+  <text class="tiny" x="1500" y="152">(1490,98) IrisLid L/R offset/arc/state T A30t10 ON/OFF</text>
 
-  <rect x="1486" y="136" width="390" height="70" rx="6" fill="#103222" stroke="#21d07a"/>
-  <text class="small" x="1500" y="158">眼皮 EAR</text>
-  <text class="tiny" x="1500" y="176">(1490,88) L_EAR</text>
-  <text class="tiny" x="1500" y="192">(1490,104/120) R_EAR / E_SYM</text>
+  <rect x="1486" y="170" width="390" height="70" rx="6" fill="#103222" stroke="#21d07a"/>
+  <text class="small" x="1500" y="192">眼皮 EAR</text>
+  <text class="tiny" x="1500" y="210">(1490,122) L_EAR</text>
+  <text class="tiny" x="1500" y="226">(1490,138/154) R_EAR / E_SYM</text>
 
-  <rect x="1486" y="214" width="390" height="88" rx="6" fill="#342b10" stroke="#ffcc33"/>
-  <text class="small" x="1500" y="236">眉毛 BIG + Slope</text>
-  <text class="tiny" x="1500" y="254">(1490,146/162) L_BIG / R_BIG</text>
-  <text class="tiny" x="1500" y="270">(1490,178/194) B_SYM / Slope</text>
+  <rect x="1486" y="248" width="390" height="72" rx="6" fill="#342b10" stroke="#ffcc33"/>
+  <text class="small" x="1500" y="270">眉毛 BIG + Slope</text>
+  <text class="tiny" x="1500" y="288">(1490,180/196) L_BIG / R_BIG</text>
+  <text class="tiny" x="1500" y="304">(1490,212/228) B_SYM / Slope</text>
 
-  <rect x="1486" y="310" width="390" height="72" rx="6" fill="#332016" stroke="#ff8a4c"/>
-  <text class="small" x="1500" y="332">嘴部参数</text>
-  <text class="tiny" x="1500" y="350">(1490,232/250/268) MAR / LLR / ULR</text>
-  <text class="tiny" x="1500" y="366">(1490,296...) MouthCorner</text>
+  <rect x="1486" y="328" width="390" height="72" rx="6" fill="#332016" stroke="#ff8a4c"/>
+  <text class="small" x="1500" y="350">嘴部参数</text>
+  <text class="tiny" x="1500" y="368">(1490,250/268/286) MAR / LLR / ULR</text>
+  <text class="tiny" x="1500" y="384">(1490,314...) MouthCorner + Curl current/target/min/saved/sym</text>
 
-  <rect x="1486" y="390" width="390" height="62" rx="6" fill="#2b2140" stroke="#c084fc"/>
-  <text class="small" x="1500" y="412">头部 + 其他</text>
-  <text class="tiny" x="1500" y="430">(1490,354...) HeadPosition</text>
-  <text class="tiny" x="1500" y="446">(1490,412/430) mp0 / EyeLine</text>
-  <text class="tiny" x="1500" y="466">(1490,448/464) ULSide tol / cam+roi</text>
-  <text class="tiny" x="1500" y="486">(1490,482/498) LLSide tol / cam+roi</text>
-  <text class="tiny" x="1500" y="506">(1490,516) FrontCam HFlip / VFlip</text>
+  <rect x="1486" y="408" width="390" height="264" rx="6" fill="#2b2140" stroke="#c084fc"/>
+  <text class="small" x="1500" y="430">头部 + 其他</text>
+  <text class="tiny" x="1500" y="448">(1490,404...) HeadPosition: Nose/Tilt/Ang/Slope</text>
+  <text class="tiny" x="1500" y="464">(1490,484/500/516) Dist / Ctr / RawPts</text>
+  <text class="tiny" x="1500" y="484">(1490,532) AdpPts / Adapter none</text>
+  <text class="tiny" x="1500" y="504">(1490,548/564) eye_left / eye_right coords</text>
+  <text class="tiny" x="1500" y="524">(1490,612/630) mp0 / EyeLine H(+dY)</text>
+  <text class="tiny" x="1500" y="544">(1490,648/664) ULSide tol / cam+roi</text>
+  <text class="tiny" x="1500" y="564">(1490,682/698/716) LLSide / FrontCam</text>
+
+  <rect x="1486" y="680" width="390" height="96" rx="6" fill="#18333a" stroke="#22d3ee"/>
+  <text class="small" x="1500" y="702">侧面轮廓对线（免 ROI）</text>
+  <text class="tiny" x="1500" y="720">(1490,734) NROI=[manual] / SELECT edge&gt;=12</text>
+  <text class="tiny" x="1500" y="738">(1490,750) N-U / U-C target + saved/default + dashed</text>
+  <text class="tiny" x="1500" y="756">(1490,766) Line tolerance + A20t5 + preview F5/J10</text>
 
   <!-- bottom info -->
-  <rect class="panel" x="8" y="1040" width="360" height="32"/>
-  <text class="small" x="18" y="1062">左下: MP / EllSeg / Landmarks</text>
+  <rect class="panel" x="8" y="1040" width="650" height="32"/>
+  <text class="small" x="18" y="1062">左下: MP / EllSeg / FaceDraw / SP4 / SPDash / SPGrid</text>
   <rect class="panel" x="1590" y="1040" width="320" height="32"/>
   <text class="small" x="1602" y="1062">右下: T / MP / Ell 耗时</text>
 
@@ -86,4 +107,13 @@
   <text class="text" x="34" y="258">优化点</text>
   <text class="small" x="34" y="282">1. 眉毛和眼皮不再横向挤在一起</text>
   <text class="small" x="34" y="302">2. 常驻参数集中到右侧，左侧只显示调整动作</text>
+  <text class="small" x="1490" y="782">Nose fit: rows&gt;=15 gap&lt;=2 step&lt;=4 win10 res&lt;=2.5</text>
+  <text class="small" x="1490" y="798">Nose: peak1.5 turn&gt;=2 border2 vertex3; missing=--</text>
+<text class="small" x="1490" y="814">Upper ROI=[manual] / SELECT</text>
+<text class="small" x="1490" y="830">Chin TURN ROI=[manual] / SELECT</text>
+<text class="small" x="1490" y="846">Lip/Chin: rows15 gap2 step4 win10/20 med5</text>
+<text class="small" x="1490" y="862">LC: hold6px confirm5 miss5; chin tangent45 win10</text>
+<text class="small" x="1490" y="878">Lower ROI=[manual] / SELECT</text>
+<text class="small" x="1490" y="894">Lower: color edge12 full-track peak1.5 turn2</text>
+<text class="small" x="1490" y="910">Lip hold=8px confirm=8 cluster=3px</text>
 </svg>

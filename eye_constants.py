@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 
-DEFAULT_SERVO_CONFIG_FILE = "29_servo_config(13).yaml"
+DEFAULT_SERVO_CONFIG_FILE = "servo_config.yaml"
 FACE_POINT_FILE = "face_point.json"
 CAMERA_CONFIG_KEY = "camera_config"
 
@@ -69,6 +69,12 @@ EYEBROW_NAMES = ["A0", "A1"]
 # ============================================================
 EYEBALL_OFFSET_TOLERANCE = 1.0   # 虹膜偏移合格阈值 (px)
 
+# 虹膜理论下圆弧与下眼皮贴合判断（供独立 A10/A11 上下贴合调整使用）
+EYEBALL_LOWER_LID_CONTACT_TOLERANCE = 0.4  # 目标 0px 的双向贴合容差
+EYEBALL_LOWER_LID_CONTACT_ARC_MIN_RATIO = 0.10  # 至少 10% 的下圆弧采样点处于贴合容差内
+EYEBALL_LOWER_LID_CONTACT_SAMPLE_FRAMES = 30  # 每轮每只眼采集的有效帧数
+EYEBALL_LOWER_LID_CONTACT_TRIM_FRAMES = 10  # 每只眼独立去掉最低/最高各 10 帧
+
 # ============================================================
 # 眼皮 EAR (Eye Aspect Ratio) 参数
 # ============================================================
@@ -82,6 +88,8 @@ LEFT_EYE_CORNERS = (33, 133)               # (外眼角, 内眼角)
 # 右眼: 上下点对 + 眼角
 RIGHT_EAR_PAIRS = [(386, 374), (385, 380)]
 RIGHT_EYE_CORNERS = (362, 263)
+LEFT_LOWER_LID_POINTS = [33, 7, 163, 144, 145, 153, 154, 155, 133]
+RIGHT_LOWER_LID_POINTS = [362, 382, 381, 380, 374, 373, 390, 249, 263]
 
 # 眼皮自动调整参数
 EYELID_WAIT_SECONDS = 1.0      # 每次调整后等待秒数
@@ -175,6 +183,33 @@ UPPER_LIP_SIDE_MIN_SAT = 18
 UPPER_LIP_SIDE_SPLIT_PCT = 58
 UPPER_LIP_SIDE_MIN_AREA = 80
 
+# ============================================================
+# 侧面轮廓对线（独立新路线，不使用保存的嘴部 ROI/基线）
+# ============================================================
+# 以侧面画面中心为中心，每帧动态取 400x400 区域。
+SIDE_PROFILE_CROP_SIZE = 400
+# 当前侧面摄像机画面中鼻尖朝画面左侧；仅影响新轮廓路线，不修改旧 ROI 路线。
+SIDE_PROFILE_FACE_DIRECTION = "left"
+SIDE_PROFILE_NOSE_X_RANGE = (80, 155)
+SIDE_PROFILE_NOSE_Y_RANGE = (105, 180)
+SIDE_PROFILE_NOSE_EDGE_CONTRAST_MIN = 12.0
+# 从用户参考图红线/黄线估算的屏幕坐标斜率 |dy/dx|。
+SIDE_PROFILE_NOSE_UPPER_TARGET_SLOPE = 1.50
+SIDE_PROFILE_LIP_CHIN_TARGET_SLOPE = 2.80
+SIDE_PROFILE_SLOPE_TOLERANCE = 0.12
+SIDE_PROFILE_LOWER_LINE_TOLERANCE_PX = 2.0
+SIDE_PROFILE_CHIN_LINE_TOLERANCE_PX = 3.0
+SIDE_PROFILE_SAMPLE_FRAMES = 20
+SIDE_PROFILE_TRIM_FRAMES = 5
+SIDE_PROFILE_WAIT_SECONDS = 1.0
+SIDE_PROFILE_BACKGROUND_DELTA = 14.0
+SIDE_PROFILE_LIP_MIN_AREA = 6
+SIDE_PROFILE_PREVIEW_FILTER_FRAMES = 5
+SIDE_PROFILE_PREVIEW_MAX_JUMP_PX = 10.0
+LIP_PREVIEW_HOLD_PX = 8.0
+LIP_PREVIEW_CONFIRM_FRAMES = 8
+LIP_PREVIEW_CLUSTER_PX = 3.0
+
 # ULR 计算用关键点 (MediaPipe 478)
 UL_LIP_TOP = 0         # 上唇上缘(人中) — mp0
 UL_IRIS_LEFT = 468     # 左眼虹膜中心
@@ -201,6 +236,10 @@ MOUTH_CORNER_TOLERANCE = 1      # 水平像素容差 (px)
 MOUTH_CORNER_Y_TOLERANCE = 1    # 垂直像素容差 (px) — 更严格
 MOUTH_CORNER_WAIT_SECONDS = 1.0
 MOUTH_CORNER_MAX_ITERATIONS = 100
+MOUTH_CORNER_CURL_TARGET = 0.020      # 嘴角相对嘴唇中线的默认目标上翘比例(归一化到嘴宽)
+MOUTH_CORNER_CURL_MIN_TARGET = 0.015  # 嘴角微翘最低通过比例，防止没翘也通过
+MOUTH_CORNER_CURL_TOLERANCE = 0.003   # 嘴角微翘比例容差
+MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE = 0.004  # 左右嘴角微翘对称容差
 # A22=右嘴角水平(前→后), A23=左嘴角垂直(上→下), A24=左嘴角水平(前→后), A25=右嘴角垂直(上→下)
 MOUTH_CORNER_H_CHANNELS = [24, 22]     # [左水平A24, 右水平A22]
 MOUTH_CORNER_V_CHANNELS = [23, 25]     # [左垂直A23, 右垂直A25]
@@ -209,6 +248,8 @@ MOUTH_CORNER_V_CHANNELS = [23, 25]     # [左垂直A23, 右垂直A25]
 # 头部定位基线参数 — 鼻尖+眼线检查
 # ============================================================
 HEAD_POSITION_BASELINE_FILE = "head_position_baseline.json"
+HEAD_POSITION_POINT_TOLERANCE = 2.0  # head_position 三个保存点的最大像素偏差容差 (px)
+HEAD_ADAPTER_POINT_TOLERANCE = 1.0   # 扣除 head_adapter 后允许启动自动调整的最大点位残差 (px)
 HEAD_NOSE_DX_TOLERANCE = 3.0   # 鼻尖水平偏移容差 (px)
 HEAD_NOSE_DY_TOLERANCE = 3.0   # 鼻尖垂直偏移容差 (px)
 HEAD_TILT_TOLERANCE = 2.0      # 头部倾斜容差 (度)

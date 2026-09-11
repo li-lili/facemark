@@ -3,18 +3,18 @@
   "active_template": "template_2",
   "common": {
     "nose": [
-      968,
-      508
+      945,
+      540
     ],
     "iris_left": [
-      1105,
-      325
+      1028,
+      427
     ],
     "iris_right": [
-      821,
-      326
+      850,
+      431
     ],
-    "eye_line_y": 325.5,
+    "eye_line_y": 429.0,
     "camera_config": {
       "front_camera_index": 1,
       "side_camera_index": 0
@@ -77,6 +77,7 @@
           568
         ]
       },
+      "mouth_corner_curl": {},
       "head_position": {
         "nose_px": [
           959,
@@ -92,82 +93,153 @@
         ],
         "frame_width": 1920,
         "frame_height": 1080,
-        "eye_distance": 312.0
-      }
+        "eye_center": [
+          965.0,
+          330.5
+        ],
+        "eye_distance": 312.0,
+        "eye_line_angle_deg": -0.918,
+        "eye_line_slope": -0.016026,
+        "nose_to_eye_center": [
+          -6.0,
+          143.5
+        ]
+      },
+      "head_adapter": {},
+      "side_profile_slopes": {},
+      "side_nose": {},
+      "side_chin": {}
     },
     "template_2": {
       "eyelid": {
-        "left_ear": 0.3819168990807094,
-        "right_ear": 0.3792613336077566,
+        "left_ear": 0.36700080388227463,
+        "right_ear": 0.3611021042208699,
         "eye_lr_basis": "marked"
       },
       "eyebrow": {
-        "left_slope": 0.28941212433738106,
-        "right_slope": -0.2856845666955596,
-        "slope_symmetry": 0.5750966910329407,
-        "left_brow_iris_gap": -0.5758548265494943,
-        "right_brow_iris_gap": -0.5600869906686065,
+        "left_slope": 0.23193835956194025,
+        "right_slope": -0.1819383314663615,
+        "slope_symmetry": 0.41387669102830177,
+        "left_brow_iris_gap": -0.5303509758402452,
+        "right_brow_iris_gap": -0.5615847445202098,
         "eye_lr_basis": "marked"
       },
       "mouth": {
-        "mar": 0.6791192861346032
+        "mar": 0.6946555449213372
       },
       "lower_lip": {
-        "llr": 0.1315370928865713,
+        "llr": 0.13932923762996563,
         "side_lower_tip": [
-          939,
-          707
+          963,
+          557
         ],
         "side_roi": [
-          846,
-          635,
-          1038,
-          733
+          856,
+          626,
+          1088,
+          788
         ]
       },
       "upper_lip": {
-        "ulr": 1.208995761823809,
+        "ulr": 1.1503319680956683,
         "side_upper_tip": [
-          952,
-          670
+          982,
+          506
         ],
         "side_roi": [
-          848,
-          635,
-          1044,
-          727
+          704,
+          474,
+          1146,
+          648
         ]
       },
       "mouth_corners": {
         "nose": [
-          968,
-          508
+          945,
+          540
         ],
         "corner_left": [
-          868,
-          610
+          1000,
+          607
         ],
         "corner_right": [
-          1060,
-          611
-        ]
+          887,
+          608
+        ],
+        "eye_lr_basis": "marked"
+      },
+      "mouth_corner_curl": {
+        "left_curl": 0.0011422569983089222,
+        "right_curl": -0.0002750557522432366
       },
       "head_position": {
         "nose_px": [
-          968,
-          508
+          945,
+          540
         ],
         "eye_left": [
-          772,
-          324
+          820,
+          435
         ],
         "eye_right": [
-          1156,
-          324
+          1061,
+          430
         ],
         "frame_width": 1920,
         "frame_height": 1080,
-        "eye_distance": 384.0
+        "eye_center": [
+          940.5,
+          432.5
+        ],
+        "eye_distance": 241.1,
+        "eye_line_angle_deg": -1.189,
+        "eye_line_slope": -0.020747,
+        "nose_to_eye_center": [
+          4.5,
+          107.5
+        ]
+      },
+      "head_adapter": {
+        "nose_offset": [
+          0.326,
+          0.121
+        ],
+        "eye_left_offset": [
+          0.725,
+          0.229
+        ],
+        "eye_right_offset": [
+          0.936,
+          0.404
+        ],
+        "eye_center_offset": [
+          0.831,
+          0.316
+        ],
+        "eye_distance_offset": 0.159171,
+        "eye_line_angle_offset_deg": 0.042582,
+        "eye_line_slope_offset": 0.000744,
+        "point_max_offset": 1.019511
+      },
+      "side_profile_slopes": {
+        "nose_upper_slope": 1.45614,
+        "lip_chin_slope": 2.654545
+      },
+      "side_nose": {
+        "roi": [
+          672,
+          362,
+          824,
+          464
+        ]
+      },
+      "side_chin": {
+        "roi": [
+          872,
+          772,
+          1190,
+          978
+        ]
       }
     }
   }

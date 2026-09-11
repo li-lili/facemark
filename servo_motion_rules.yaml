@@ -1,0 +1,55 @@
+version: 1
+source: "舵机实际效果记录.md"
+description: "实测舵机运动方向。angle_plus/angle_minus 表示角度数值增加/减少时的实际效果。"
+SERVO_EFFECTS:
+  A0:
+    angle_plus: 上
+    angle_minus: 下
+  A1:
+    angle_plus: 下
+    angle_minus: 上
+  A8:
+    angle_plus: 合
+    angle_minus: 开
+  A9:
+    angle_plus: 开
+    angle_minus: 合
+  A10:
+    angle_plus: 上
+    angle_minus: 下
+  A11:
+    angle_plus: 下
+    angle_minus: 上
+  A12:
+    angle_plus: 内
+    angle_minus: 外
+  A13:
+    angle_plus: 外
+    angle_minus: 内
+  A16:
+    angle_plus: 下
+    angle_minus: 上
+  A17:
+    angle_plus: 后
+    angle_minus: 前
+  A18:
+    angle_plus: 前
+    angle_minus: 后
+  A19:
+    angle_plus: 上
+    angle_minus: 下
+  A22:
+    angle_plus: 前
+    angle_minus: 后
+  A23:
+    angle_plus: 上
+    angle_minus: 下
+  A24:
+    angle_plus: 后
+    angle_minus: 前
+  A25:
+    angle_plus: 下
+    angle_minus: 上
+  A26:
+    angle_plus: 开
+    angle_minus: 合

@@ -30,11 +30,13 @@ MOUTH_CORNERS_BASELINE_FILE = os.path.join(DIR, "mouth_corners_baseline.json")
 HEAD_POSITION_BASELINE_FILE = os.path.join(DIR, "head_position_baseline.json")
 BASELINE_SECTIONS = (
     "eyelid", "eyebrow", "mouth", "lower_lip", "upper_lip",
-    "mouth_corners", "head_position",
+    "mouth_corners", "head_position", "head_adapter", "side_profile_slopes",
 )
 DEFAULT_TEMPLATE_NAME = "default"
 
 from eye_constants import (
+    EYEBALL_LOWER_LID_CONTACT_SAMPLE_FRAMES,
+    EYEBALL_LOWER_LID_CONTACT_TRIM_FRAMES,
     EYEBALL_OFFSET_TOLERANCE,
     EYELID_EAR_TOLERANCE,
     LOWER_LIP_SIDE_CAMERA_INDEX,
@@ -42,6 +44,25 @@ from eye_constants import (
     LOWER_LIP_SIDE_ROI,
     LOWER_LIP_SIDE_X_TOLERANCE,
     LOWER_LIP_SIDE_Y_TOLERANCE,
+    MOUTH_CORNER_CURL_MIN_TARGET,
+    MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE,
+    MOUTH_CORNER_CURL_TARGET,
+    MOUTH_CORNER_CURL_TOLERANCE,
+    HEAD_ADAPTER_POINT_TOLERANCE,
+    SIDE_PROFILE_CHIN_LINE_TOLERANCE_PX,
+    SIDE_PROFILE_CROP_SIZE,
+    SIDE_PROFILE_FACE_DIRECTION,
+    SIDE_PROFILE_LIP_CHIN_TARGET_SLOPE,
+    SIDE_PROFILE_LOWER_LINE_TOLERANCE_PX,
+    SIDE_PROFILE_NOSE_UPPER_TARGET_SLOPE,
+    SIDE_PROFILE_NOSE_EDGE_CONTRAST_MIN,
+    SIDE_PROFILE_NOSE_X_RANGE,
+    SIDE_PROFILE_NOSE_Y_RANGE,
+    SIDE_PROFILE_PREVIEW_FILTER_FRAMES,
+    SIDE_PROFILE_PREVIEW_MAX_JUMP_PX,
+    SIDE_PROFILE_SAMPLE_FRAMES,
+    SIDE_PROFILE_SLOPE_TOLERANCE,
+    SIDE_PROFILE_TRIM_FRAMES,
     UPPER_LIP_SIDE_CAMERA_INDEX,
     UPPER_LIP_SIDE_FLIP_VERTICAL,
     UPPER_LIP_SIDE_ROI,
@@ -225,21 +246,31 @@ from face_point_store import (
     load_eyebrow_baseline,
     load_eyelid_baseline,
     load_face_point_data,
+    load_head_adapter_baseline,
     load_head_position_baseline,
     load_lower_lip_baseline,
     load_mouth_baseline,
+    load_mouth_corner_curl_baseline,
     load_mouth_corners_baseline,
+    load_side_profile_slope_baseline,
+    load_side_nose_roi,
+    load_side_chin_roi,
+    save_side_chin_roi,
+    save_side_nose_roi,
     load_upper_lip_baseline,
     save_baseline,
     save_current_as_template,
     save_eyebrow_baseline,
     save_eyelid_baseline,
     save_face_point_data,
+    save_head_adapter_baseline,
     save_head_position_baseline,
     save_lower_lip_baseline,
     save_lower_lip_side_roi,
     save_mouth_baseline,
+    save_mouth_corner_curl_baseline,
     save_mouth_corners_baseline,
+    save_side_profile_slope_baseline,
     save_upper_lip_baseline,
     save_upper_lip_side_roi,
     set_active_template,
@@ -277,6 +308,11 @@ class EllSegDetector:
         self.show_all_landmarks = False  # 显示所有 MediaPipe 关键点
         self.show_baseline_overlay = False  # 叠加显示标准眼球位置基线
         self.show_eye_line_offset = False  # 显示参考线垂直偏移 HUD
+        self.show_iris_cover_overlay = False  # 显示虹膜下弧遮盖计算线
+        self.show_face_overlays = True  # 总开关：人物脸上的点、线和框（HUD 不受影响）
+        self.show_side_profile_preview = False  # Qt 侧面四端点观察开关状态
+        self.show_side_profile_expected_slope = False  # Qt 侧面期望斜率虚线状态
+        self.show_side_profile_coordinate_grid = False  # Qt 侧面中心框局部坐标网格
 
         print("[Detector] Initializing MediaPipe...")
         self.landmarker = _init_mediapipe()
@@ -363,6 +399,14 @@ class EllSegDetector:
         else:
             print("[MouthCorners Baseline] No mouth corners baseline found.")
 
+        self.mouth_corner_curl_baseline = load_mouth_corner_curl_baseline()
+        if self.mouth_corner_curl_baseline:
+            print(f"[MouthCornerCurl Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
+            print(f"  L_curl = {self.mouth_corner_curl_baseline['left_curl']:+.4f}")
+            print(f"  R_curl = {self.mouth_corner_curl_baseline['right_curl']:+.4f}")
+        else:
+            print("[MouthCornerCurl Baseline] No mouth corner curl baseline found.")
+
         # 头部定位基线
         self.head_position_baseline = load_head_position_baseline()
         if self.head_position_baseline:
@@ -371,8 +415,29 @@ class EllSegDetector:
             print(f"  L_eye  = {self.head_position_baseline['eye_left']}")
             print(f"  R_eye  = {self.head_position_baseline['eye_right']}")
             print(f"  eye_dist = {self.head_position_baseline['eye_distance']:.1f}")
+            print(f"  eye_angle = {self.head_position_baseline['eye_line_angle_deg']:+.3f}")
+            print(f"  eye_slope = {self.head_position_baseline['eye_line_slope']}")
         else:
             print("[HeadPosition Baseline] No head position baseline found.")
+
+        self.head_adapter_baseline = load_head_adapter_baseline()
+        if self.head_adapter_baseline:
+            print(f"[HeadAdapter Baseline] Loaded from {FACE_POINT_FILE} ({get_active_template()})")
+            print(f"  nose_offset = {self.head_adapter_baseline.get('nose_offset')}")
+            print(f"  point_max_offset = {self.head_adapter_baseline.get('point_max_offset')}")
+        else:
+            print("[HeadAdapter Baseline] No head adapter found.")
+
+        self.side_nose_roi = load_side_nose_roi()
+        self.side_chin_roi = load_side_chin_roi()
+        self.side_profile_slope_baseline = load_side_profile_slope_baseline()
+        if self.side_profile_slope_baseline:
+            print(
+                f"[SideProfile Slopes] N-U="
+                f"{self.side_profile_slope_baseline['nose_upper_slope']:.4f} "
+                f"U-C={self.side_profile_slope_baseline['lip_chin_slope']:.4f}")
+        else:
+            print("[SideProfile Slopes] Using default target slopes.")
 
         self._timestamp = 0
         self.last_result = None
@@ -435,6 +500,82 @@ class EllSegDetector:
     # 显示线程 — 独立线程持续刷新检测画面，主逻辑只管推数据
     # ==================================================================
 
+    def _draw_lower_iris_cover_overlay(self, img, det):
+        """绘制虹膜下弧遮盖判断所用的椭圆、眼皮曲线与深度线。"""
+        signal = det.get("lower_iris_cover")
+        if not signal:
+            return
+
+        for side in ("left", "right"):
+            measurement = signal.get(side) or {}
+            ellipse = det.get(f"{side}_iris_ellipse")
+            if ellipse is not None:
+                (cx, cy), (axis_w, axis_h), angle_deg = ellipse
+                rotated_rect = (
+                    (int(round(cx)), int(round(cy))),
+                    (max(1, int(round(axis_w))), max(1, int(round(axis_h)))),
+                    float(angle_deg),
+                )
+                # 暗黄色：EllSeg 当前完整虹膜拟合椭圆。
+                cv2.ellipse(img, rotated_rect, (0, 180, 220), 1, cv2.LINE_AA)
+
+            arc_points = measurement.get("arc_points")
+            lid_points = measurement.get("lid_curve_points")
+            contact_mask = measurement.get("contact_mask")
+            over_cover_mask = measurement.get("over_cover_mask")
+            if arc_points is None or lid_points is None:
+                continue
+
+            arc_px = np.rint(np.asarray(arc_points)).astype(np.int32)
+            lid_px = np.rint(np.asarray(lid_points)).astype(np.int32)
+            if len(arc_px) >= 2:
+                # 黄色：用于计算的理论虹膜下圆弧。
+                cv2.polylines(img, [arc_px], False, (0, 255, 255), 1, cv2.LINE_AA)
+            if len(lid_px) >= 2:
+                # 青色：同一批 X 位置插值得到的下眼皮曲线。
+                cv2.polylines(img, [lid_px], False, (255, 255, 0), 1, cv2.LINE_AA)
+
+            if over_cover_mask is not None and len(arc_px) >= 2:
+                mask = np.asarray(over_cover_mask, dtype=bool)
+                # 红色：下眼皮遮住过多的理论下圆弧段。
+                for index in range(min(len(mask), len(arc_px)) - 1):
+                    if mask[index] and mask[index + 1]:
+                        cv2.line(
+                            img,
+                            tuple(arc_px[index]),
+                            tuple(arc_px[index + 1]),
+                            (0, 0, 255), 3, cv2.LINE_AA,
+                        )
+
+            if contact_mask is not None and len(arc_px) >= 2:
+                mask = np.asarray(contact_mask, dtype=bool)
+                # 绿色：理论下圆弧与下眼皮处于贴合容差内的弧段。
+                for index in range(min(len(mask), len(arc_px)) - 1):
+                    if mask[index] and mask[index + 1]:
+                        cv2.line(
+                            img,
+                            tuple(arc_px[index]),
+                            tuple(arc_px[index + 1]),
+                            (0, 255, 0), 3, cv2.LINE_AA,
+                        )
+
+            depth_segment = measurement.get("depth_segment")
+            if depth_segment is not None:
+                lid_point, arc_point = depth_segment
+                if measurement.get("qualified", False):
+                    depth_color = (0, 255, 0)
+                elif (measurement.get("contact_offset_px") or 0.0) > 0.0:
+                    depth_color = (0, 0, 255)
+                else:
+                    depth_color = (0, 165, 255)
+                # 绿/红/橙色：第 90 百分位有符号贴合偏差的代表线段。
+                cv2.line(
+                    img,
+                    tuple(np.rint(lid_point).astype(np.int32)),
+                    tuple(np.rint(arc_point).astype(np.int32)),
+                    depth_color, 2, cv2.LINE_AA,
+                )
+
     def _display_loop(self):
         """显示线程主循环: 持续读取 last_result 并刷新窗口"""
         while not self._stop_event.is_set():
@@ -442,35 +583,55 @@ class EllSegDetector:
             if det and det.get("frame") is not None:
                 img = det["frame"].copy()
 
-                # 关键点圆
-                if det.get("nose"):
-                    cv2.circle(img, det["nose"], 5, (0, 255, 0), -1)
-                if det.get("left_iris"):
-                    cv2.circle(img, det["left_iris"], 4, (0, 255, 255), -1)
-                if det.get("right_iris"):
-                    cv2.circle(img, det["right_iris"], 4, (0, 255, 255), -1)
+                eye_line_signal = self.get_eye_line_screen_signal()
+                iris_overlay_visible = (
+                    self.show_face_overlays and self.show_iris_cover_overlay)
+                if self.show_face_overlays:
+                    # 关键点圆
+                    if det.get("nose"):
+                        cv2.circle(img, det["nose"], 5, (0, 255, 0), -1)
+                    if det.get("left_iris"):
+                        cv2.circle(img, det["left_iris"], 4, (0, 255, 255), -1)
+                    if det.get("right_iris"):
+                        cv2.circle(img, det["right_iris"], 4, (0, 255, 255), -1)
 
-                # 标准眼球位置基线叠加 (G 键开关)
-                if self.show_baseline_overlay and self.baseline:
-                    bl = self.baseline
-                    # 半透明图层
-                    overlay = img.copy()
-                    # 标准眼球位置 — 大虚线圈
-                    bl_nose = (int(bl["nose"][0]), int(bl["nose"][1]))
-                    bl_L = (int(bl["iris_left"][0]), int(bl["iris_left"][1]))
-                    bl_R = (int(bl["iris_right"][0]), int(bl["iris_right"][1]))
-                    cv2.circle(overlay, bl_nose, 16, (0, 255, 0), 2)
-                    cv2.circle(overlay, bl_L, 16, (255, 255, 0), 2)
-                    cv2.circle(overlay, bl_R, 16, (255, 255, 0), 2)
-                    # 连线: 鼻尖→左眼 / 鼻尖→右眼 (显示标准三角)
-                    cv2.line(overlay, bl_nose, bl_L, (0, 255, 0), 1, cv2.LINE_AA)
-                    cv2.line(overlay, bl_nose, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
-                    cv2.line(overlay, bl_L, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
-                    # 混入透明
-                    img = cv2.addWeighted(overlay, 0.45, img, 0.55, 0)
-                    # 标签
-                    cv2.putText(img, "Baseline", (bl_nose[0] + 20, bl_nose[1] - 10),
-                               0, 0.4, (0, 255, 0), 1)
+                    if iris_overlay_visible:
+                        self._draw_lower_iris_cover_overlay(img, det)
+
+                    if eye_line_signal:
+                        eye_l = eye_line_signal["left"]
+                        eye_r = eye_line_signal["right"]
+                        ref_y = eye_line_signal["mid_y"]
+                        # 蓝色眼角线 + 同高度屏幕水平参考线。
+                        cv2.line(img,
+                                 (int(eye_l[0]), int(ref_y)),
+                                 (int(eye_r[0]), int(ref_y)),
+                                 (255, 220, 160), 1, cv2.LINE_AA)
+                        cv2.line(img,
+                                 (int(eye_l[0]), int(eye_l[1])),
+                                 (int(eye_r[0]), int(eye_r[1])),
+                                 (255, 150, 0), 2, cv2.LINE_AA)
+
+                    # 标准眼球位置基线叠加 (G 键开关)
+                    if self.show_baseline_overlay and self.baseline:
+                        bl = self.baseline
+                        overlay = img.copy()
+                        target_nose = self._eyeball_target_point("nose") or bl["nose"]
+                        target_L = self._eyeball_target_point("left") or bl["iris_left"]
+                        target_R = self._eyeball_target_point("right") or bl["iris_right"]
+                        bl_nose = (int(target_nose[0]), int(target_nose[1]))
+                        bl_L = (int(target_L[0]), int(target_L[1]))
+                        bl_R = (int(target_R[0]), int(target_R[1]))
+                        cv2.circle(overlay, bl_nose, 16, (0, 255, 0), 2)
+                        cv2.circle(overlay, bl_L, 16, (255, 255, 0), 2)
+                        cv2.circle(overlay, bl_R, 16, (255, 255, 0), 2)
+                        cv2.line(overlay, bl_nose, bl_L, (0, 255, 0), 1, cv2.LINE_AA)
+                        cv2.line(overlay, bl_nose, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
+                        cv2.line(overlay, bl_L, bl_R, (0, 255, 0), 1, cv2.LINE_AA)
+                        img = cv2.addWeighted(overlay, 0.45, img, 0.55, 0)
+                        label = "Target" if self._eyeball_target_mode() == "head_adapter" else "Baseline"
+                        cv2.putText(img, label, (bl_nose[0] + 20, bl_nose[1] - 10),
+                                   0, 0.4, (0, 255, 0), 1)
 
                 # PASS/FAIL + 常驻 HUD。
                 # 右侧信息栏统一承载检测参数，左侧留给 auto_adjust 的临时提示。
@@ -478,41 +639,89 @@ class EllSegDetector:
                 cv2.putText(img, f"{'PASS' if q else 'FAIL'}", (10, 22), 0, 0.55,
                            (0, 255, 0) if q else (0, 0, 255), 1)
                 x_off = max(340, img.shape[1] - 430)
+                panel_bottom = min(img.shape[0] - 40, 788)
                 panel = img.copy()
                 cv2.rectangle(panel,
                               (max(0, x_off - 10), 30),
-                              (img.shape[1] - 8, 508),
+                              (img.shape[1] - 8, panel_bottom),
                               (20, 20, 20),
                               -1)
                 cv2.addWeighted(panel, 0.58, img, 0.42, 0, img)
                 cv2.rectangle(img,
                               (max(0, x_off - 10), 30),
-                              (img.shape[1] - 8, 508),
+                              (img.shape[1] - 8, panel_bottom),
                               (80, 80, 80),
                               1)
                 y_off = 44
-                off = det.get("offset", {})
-                for label, o in [("L", off.get("left")), ("R", off.get("right"))]:
+                raw_off = det.get("offset", {})
+                off = det.get("target_offset", raw_off)
+                target_mode = det.get("eyeball_target_mode", "raw")
+                for label, key, o in [("L", "left", off.get("left")), ("R", "right", off.get("right"))]:
                     if o:
                         dx, dy, d = o
+                        if target_mode == "head_adapter":
+                            raw = raw_off.get(key)
+                            raw_text = f" raw={raw[0]:+.1f},{raw[1]:+.1f}" if raw else ""
+                            text = f"{label}*:dX={dx:+.1f} dY={dy:+.1f} d={d:.1f}px{raw_text}"
+                        else:
+                            text = f"{label}:dX={dx:+.1f} dY={dy:+.1f} d={d:.1f}px"
                         cv2.putText(img,
-                                   f"{label}:dX={dx:+.1f} dY={dy:+.1f} d={d:.1f}px",
+                                   text,
                                    (x_off, y_off), 0, 0.35,
                                    (0, 255, 0) if d <= TOLERANCE else (0, 0, 255), 1)
                     y_off += 18
 
-                # 参考线垂直偏移 HUD (Y 键开关)
-                if self.show_eye_line_offset and off:
-                    dy_eye = off.get("_dy_eye_line", 0.0)
-                    color = (0, 255, 255) if abs(dy_eye) < 3 else (0, 165, 255)
-                    cv2.putText(img,
-                               f"EyeLine dY={dy_eye:+.1f}px",
-                               (x_off, 430), 0, 0.38, color, 1)
+                # 虹膜中心在本眼上下眼皮之间的位置比例（上=0%，下=100%）。
+                # 仅用于观察，不参与眼球 dx/dy 或合格判断。
+                lid_pos = self.get_eyeball_lid_position_signal(det=det)
+                if lid_pos:
+                    def _ratio_text(value):
+                        return "--" if value is None else f"{value * 100.0:.1f}%"
+
+                    cv2.putText(
+                        img,
+                        f"IrisY L={_ratio_text(lid_pos['left'])} "
+                        f"R={_ratio_text(lid_pos['right'])} (Top0 Bottom100)",
+                        (x_off, 80), 0, 0.35, (200, 220, 255), 1)
+
+                cover_signal = det.get("lower_iris_cover")
+                if cover_signal:
+                    def _cover_text(label, value):
+                        if not value or value.get("contact_offset_px") is None:
+                            return f"{label}:--"
+                        return (
+                            f"{label}:{value['contact_offset_px']:+.1f}/"
+                            f"{value['contact_arc_ratio'] * 100.0:.0f}%"
+                            f"{value['state']}"
+                        )
+
+                    cover_ok = all(
+                        cover_signal.get(side, {}).get("qualified", False)
+                        for side in ("left", "right")
+                    )
+                    cv2.putText(
+                        img,
+                        f"IrisLid {_cover_text('L', cover_signal.get('left'))} "
+                        f"{_cover_text('R', cover_signal.get('right'))} "
+                        f"T:0+/-{cover_signal['contact_tolerance_px']:.1f}/"
+                        f"{cover_signal['contact_arc_min_ratio'] * 100.0:.0f}% "
+                        f"A{EYEBALL_LOWER_LID_CONTACT_SAMPLE_FRAMES}t"
+                        f"{EYEBALL_LOWER_LID_CONTACT_TRIM_FRAMES} "
+                        f"{'ON' if iris_overlay_visible else 'OFF'}",
+                        (x_off, 98), 0, 0.29,
+                        (0, 255, 0) if cover_ok else (0, 0, 255), 1)
+
+                if eye_line_signal:
+                    color = (0, 255, 0) if eye_line_signal["horizontal_ok"] else (0, 0, 255)
+                    text = f"EyeLine H={eye_line_signal['angle_deg']:+.1f}°"
+                    if self.show_eye_line_offset and off:
+                        text += f" dY={off.get('_dy_eye_line', 0.0):+.1f}px"
+                    cv2.putText(img, text, (x_off, 630), 0, 0.38, color, 1)
 
                 # mp0(人中) 实时坐标 — 右侧
                 if hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     mp0 = self._last_lms_smooth[0]
-                    cv2.putText(img, f"mp0:({mp0[0]:.0f},{mp0[1]:.0f})", (x_off, 412), 0, 0.35, (255, 200, 0), 1)
+                    cv2.putText(img, f"mp0:({mp0[0]:.0f},{mp0[1]:.0f})", (x_off, 612), 0, 0.35, (255, 200, 0), 1)
 
                 # FPS 显示 (来自主采集线程的实际捕获速率)
                 cap_fps = self._capture_fps
@@ -531,7 +740,7 @@ class EllSegDetector:
                         e_sym = signal["eyelid_symmetry"]
                         e_sym_color = (0, 255, 0) if signal["symmetry_qualified"] else (0, 0, 255)
                         x_eye = x_off
-                        y_eye = 88
+                        y_eye = 122
                         cv2.putText(img, f"L_EAR={l_ear:.3f} (bl={bl['left_ear']:.3f})",
                                    (x_eye, y_eye), 0, 0.35,
                                    (0, 255, 0) if l_ok else (0, 0, 255), 1)
@@ -549,7 +758,7 @@ class EllSegDetector:
                         l_ok = signal["left_qualified"]
                         r_ok = signal["right_qualified"]
                         x_brow = x_off
-                        y_brow = 146
+                        y_brow = 180
                         left_color = (0, 255, 0) if l_ok else (0, 0, 255)
                         right_color = (0, 255, 0) if r_ok else (0, 0, 255)
                         sym_color = (0, 255, 0) if signal["big_symmetry_ok"] else (0, 0, 255)
@@ -574,7 +783,7 @@ class EllSegDetector:
                         bl = self.mouth_baseline
                         mar = signal["mar"]
                         ok = signal["qualified"]
-                        y_mouth = 232
+                        y_mouth = 250
                         cv2.putText(img, f"MAR={mar:.3f} (bl={bl['mar']:.3f})",
                                    (x_off, y_mouth), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
@@ -585,7 +794,7 @@ class EllSegDetector:
                     if signal:
                         bl = self.lower_lip_baseline
                         ok = signal["qualified"]
-                        y_ll = 250
+                        y_ll = 268
                         cv2.putText(img, f"LLR={signal['llr']:.3f} (bl={bl['llr']:.3f})",
                                    (x_off, y_ll), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
@@ -596,7 +805,7 @@ class EllSegDetector:
                     if signal:
                         bl = self.upper_lip_baseline
                         ok = signal["qualified"]
-                        y_ul = 268
+                        y_ul = 286
                         cv2.putText(img, f"ULR={signal['ulr']:.3f} (bl={bl['ulr']:.3f})",
                                    (x_off, y_ul), 0, 0.35,
                                    (0, 255, 0) if ok else (0, 0, 255), 1)
@@ -605,7 +814,7 @@ class EllSegDetector:
                 if self.mouth_corners_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_mouth_corner_signal()
                     if signal:
-                        y_mc = 296
+                        y_mc = 314
                         cv2.putText(img, "MouthCorner:",
                                    (x_off, y_mc), 0, 0.35, (255, 200, 0), 1)
                         y_mc += 16
@@ -619,11 +828,25 @@ class EllSegDetector:
                                        (0, 255, 0) if ok else (0, 0, 255), 1)
                             y_mc += 16
 
+                curl_signal = self.get_mouth_corner_curl_signal()
+                if curl_signal:
+                    ok = curl_signal.get("all_qualified", False)
+                    cv2.putText(img,
+                               f"Curl L={curl_signal['left']['curl']:+.3f}/{curl_signal['left']['target']:+.3f} R={curl_signal['right']['curl']:+.3f}/{curl_signal['right']['target']:+.3f}",
+                               (x_off, 362), 0, 0.35,
+                               (0, 255, 0) if ok else (0, 0, 255), 1)
+                    min_label = (f"Curl min>={curl_signal['min_target']:.3f}"
+                                 if curl_signal.get("min_required", False) else "Curl saved")
+                    cv2.putText(img,
+                               f"{min_label} Sym={curl_signal['symmetry_delta']:.3f}<={curl_signal['symmetry_tolerance']:.3f}",
+                               (x_off, 378), 0, 0.35,
+                               (0, 255, 0) if curl_signal.get("symmetry_qualified", False) else (0, 0, 255), 1)
+
                 # 头部定位 HUD — 鼻尖+倾斜+对称 (如果有基线) — 右侧
                 if self.head_position_baseline and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     signal = self.get_head_signal()
                     if signal:
-                        y_hd = 354
+                        y_hd = 404
                         cv2.putText(img, "HeadPosition:",
                                    (x_off, y_hd), 0, 0.35, (255, 180, 0), 1)
                         y_hd += 16
@@ -642,42 +865,77 @@ class EllSegDetector:
                                    (0, 255, 0) if tilt_ok else (0, 0, 255), 1)
                         y_hd += 16
                         # 对称
-                        sym_ok = signal["symmetry_ok"]
                         cv2.putText(img,
-                                   f"  Sym:  {signal['symmetry']:.3f}",
+                                   f"  Ang={signal['eye_line_angle_deg']:+.2f} bl={signal['baseline_eye_line_angle_deg']:+.2f} d={signal['eye_line_angle_delta_deg']:+.2f}",
                                    (x_off, y_hd), 0, 0.35,
-                                   (0, 255, 0) if sym_ok else (0, 0, 255), 1)
+                                   (0, 255, 0) if tilt_ok else (0, 0, 255), 1)
+                        y_hd += 16
+                        slope = signal["eye_line_slope"]
+                        bl_slope = signal["baseline_eye_line_slope"]
+                        slope_delta = signal["eye_line_slope_delta"]
+                        slope_text = "inf" if slope is None else f"{slope:+.4f}"
+                        bl_slope_text = "inf" if bl_slope is None else f"{bl_slope:+.4f}"
+                        slope_delta_text = "inf" if slope_delta is None else f"{slope_delta:+.4f}"
+                        cv2.putText(img,
+                                   f"  Slope={slope_text} bl={bl_slope_text} d={slope_delta_text}",
+                                   (x_off, y_hd), 0, 0.35,
+                                   (0, 255, 0) if tilt_ok else (0, 0, 255), 1)
+                        y_hd += 16
+                        cv2.putText(img,
+                                   f"  Dist={signal['eye_distance']:.1f} bl={signal['baseline_eye_distance']:.1f} d={signal['eye_distance_delta']:+.1f}",
+                                   (x_off, y_hd), 0, 0.35, (200, 220, 255), 1)
+                        y_hd += 16
+                        cv2.putText(img,
+                                   f"  Ctr dX={signal['eye_center_dx']:+.1f} dY={signal['eye_center_dy']:+.1f}",
+                                   (x_off, y_hd), 0, 0.35, (200, 220, 255), 1)
+                        y_hd += 16
+                        points_ok = signal["points_ok"]
+                        cv2.putText(img,
+                                   f"  RawPts N={signal['nose_dist']:.1f} L={signal['eye_left_dist']:.1f} R={signal['eye_right_dist']:.1f} <= {signal['point_tolerance']:.1f}",
+                                   (x_off, y_hd), 0, 0.35,
+                                   (0, 255, 0) if points_ok else (0, 0, 255), 1)
+                        y_hd += 16
+                        adapter_active = signal.get("adapter_active", False)
+                        adapter_ok = signal.get("adapter_points_ok", False)
+                        if adapter_active:
+                            adapter_text = (
+                                f"  AdpPts N={signal['adapter_nose_dist']:.1f} "
+                                f"L={signal['adapter_eye_left_dist']:.1f} "
+                                f"R={signal['adapter_eye_right_dist']:.1f} <= {signal['adapter_point_tolerance']:.1f}"
+                            )
+                            adapter_color = (0, 255, 0) if adapter_ok else (0, 0, 255)
+                        else:
+                            adapter_text = "  Adapter: none"
+                            adapter_color = (200, 220, 255)
+                        cv2.putText(img, adapter_text,
+                                   (x_off, y_hd), 0, 0.35, adapter_color, 1)
+                        y_hd += 16
+                        eye_left = signal["eye_left"]
+                        eye_right = signal["eye_right"]
+                        cv2.putText(img,
+                                   f"  eye_left:  ({eye_left[0]:.0f},{eye_left[1]:.0f})",
+                                   (x_off, y_hd), 0, 0.35, (200, 220, 255), 1)
+                        y_hd += 16
+                        cv2.putText(img,
+                                   f"  eye_right: ({eye_right[0]:.0f},{eye_right[1]:.0f})",
+                                   (x_off, y_hd), 0, 0.35, (200, 220, 255), 1)
                         # 画面中心十字线 (画面正中央)
-                        cx = img.shape[1] // 2
-                        cy = img.shape[0] // 2
                         # 淡黄色虚十字
-                        cross_color = (0, 215, 255)
-                        cv2.line(img, (cx - 40, cy), (cx - 10, cy), cross_color, 1)
-                        cv2.line(img, (cx + 10, cy), (cx + 40, cy), cross_color, 1)
-                        cv2.line(img, (cx, cy - 40), (cx, cy - 10), cross_color, 1)
-                        cv2.line(img, (cx, cy + 10), (cx, cy + 40), cross_color, 1)
-                        # 蓝色眼线: 当前左右眼外角连线
-                        from eye_constants import HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX
-                        eye_L = self._last_lms_smooth[HEAD_EYE_LEFT_IDX]
-                        eye_R = self._last_lms_smooth[HEAD_EYE_RIGHT_IDX]
-                        cv2.line(img,
-                                 (int(eye_L[0]), int(eye_L[1])),
-                                 (int(eye_R[0]), int(eye_R[1])),
-                                 (255, 150, 0), 1)
                         # 基线眼线位置 (半透明白色)
-                        bl = self.head_position_baseline
-                        cv2.line(img,
-                                 (int(bl["eye_left"][0]), int(bl["eye_left"][1])),
-                                 (int(bl["eye_right"][0]), int(bl["eye_right"][1])),
-                                 (255, 255, 200), 1, cv2.LINE_AA)
-                        # 鼻尖到基线鼻尖的偏移指示箭头 (红色)
-                        if abs(signal["nose_dx"]) > 0.5 or abs(signal["nose_dy"]) > 0.5:
-                            nose_cur = self._last_lms_smooth[1]  # HEAD_NOSE_IDX=1
-                            nose_bl = (int(bl["nose_px"][0]), int(bl["nose_px"][1]))
+                        if self.show_face_overlays:
+                            bl = self.head_position_baseline
                             cv2.line(img,
-                                     (int(nose_cur[0]), int(nose_cur[1])),
-                                     nose_bl,
-                                     (0, 0, 255), 1)
+                                     (int(bl["eye_left"][0]), int(bl["eye_left"][1])),
+                                     (int(bl["eye_right"][0]), int(bl["eye_right"][1])),
+                                     (255, 255, 200), 1, cv2.LINE_AA)
+                            # 鼻尖到基线鼻尖的偏移指示线 (红色)
+                            if abs(signal["nose_dx"]) > 0.5 or abs(signal["nose_dy"]) > 0.5:
+                                nose_cur = self._last_lms_smooth[1]  # HEAD_NOSE_IDX=1
+                                nose_bl = (int(bl["nose_px"][0]), int(bl["nose_px"][1]))
+                                cv2.line(img,
+                                         (int(nose_cur[0]), int(nose_cur[1])),
+                                         nose_bl,
+                                         (0, 0, 255), 1)
 
                 # 上唇侧面自动调整参数 — 右侧常驻显示
                 roi = UPPER_LIP_SIDE_ROI
@@ -685,10 +943,10 @@ class EllSegDetector:
                     roi = self.upper_lip_baseline["side_roi"]
                 cv2.putText(img,
                            f"ULSide tol: X<={UPPER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={UPPER_LIP_SIDE_Y_TOLERANCE:.1f}px",
-                           (x_off, 448), 0, 0.35, (200, 220, 255), 1)
+                           (x_off, 648), 0, 0.35, (200, 220, 255), 1)
                 cv2.putText(img,
                            f"ULSide cam={UPPER_LIP_SIDE_CAMERA_INDEX} VFlip={UPPER_LIP_SIDE_FLIP_VERTICAL} roi=[{roi[0]},{roi[1]},{roi[2]},{roi[3]}]",
-                           (x_off, 464), 0, 0.35, (200, 220, 255), 1)
+                           (x_off, 664), 0, 0.35, (200, 220, 255), 1)
 
                 # 下唇侧面自动调整参数 — 右侧常驻显示
                 lower_roi = LOWER_LIP_SIDE_ROI
@@ -696,13 +954,59 @@ class EllSegDetector:
                     lower_roi = self.lower_lip_baseline["side_roi"]
                 cv2.putText(img,
                            f"LLSide tol: X<={LOWER_LIP_SIDE_X_TOLERANCE:.1f}px Y<={LOWER_LIP_SIDE_Y_TOLERANCE:.1f}px",
-                           (x_off, 482), 0, 0.35, (200, 220, 255), 1)
+                           (x_off, 682), 0, 0.35, (200, 220, 255), 1)
                 cv2.putText(img,
                            f"LLSide cam={LOWER_LIP_SIDE_CAMERA_INDEX} VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL} roi=[{lower_roi[0]},{lower_roi[1]},{lower_roi[2]},{lower_roi[3]}]",
-                           (x_off, 498), 0, 0.35, (200, 220, 255), 1)
+                           (x_off, 698), 0, 0.35, (200, 220, 255), 1)
                 cv2.putText(img,
                            f"FrontCam HFlip={self.flip_horizontal} VFlip={self.flip_vertical}",
-                           (x_off, 516), 0, 0.35, (200, 220, 255), 1)
+                           (x_off, 716), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           f"SideProfile center={SIDE_PROFILE_CROP_SIZE}x{SIDE_PROFILE_CROP_SIZE} "
+                           f"dir={SIDE_PROFILE_FACE_DIRECTION} "
+                           f"NROI={self.side_nose_roi or 'SELECT'} "
+                           f"edge>={SIDE_PROFILE_NOSE_EDGE_CONTRAST_MIN:.0f}",
+                           (x_off, 734), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           "Nose fit: rows>=15 gap<=2 step<=4 win10 res<=2.5",
+                           (x_off, 782), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           "Nose: peak1.5 turn>=2 border2 vertex3; missing=--",
+                           (x_off, 798), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, f"Upper ROI={(self.upper_lip_baseline or {}).get('side_roi', 'SELECT')}",
+                           (x_off, 814), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, f"Chin TURN ROI={self.side_chin_roi or 'SELECT'}",
+                           (x_off, 830), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, "Lip/Chin: rows15 gap2 step4 win10/20 med5",
+                           (x_off, 846), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, "LC: hold6px confirm5 miss5; chin tangent45 win10",
+                           (x_off, 862), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, f"Lower ROI={(self.lower_lip_baseline or {}).get('side_roi', 'SELECT')}",
+                           (x_off, 878), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img, "Lower: color edge12 full-track peak1.5 turn2",
+                           (x_off, 894), 0, 0.35, (200, 220, 255), 1)
+                from eye_constants import LIP_PREVIEW_HOLD_PX, LIP_PREVIEW_CONFIRM_FRAMES, LIP_PREVIEW_CLUSTER_PX
+                cv2.putText(img, f"Lip hold={LIP_PREVIEW_HOLD_PX:.0f}px confirm={LIP_PREVIEW_CONFIRM_FRAMES} cluster={LIP_PREVIEW_CLUSTER_PX:.0f}px",
+                           (x_off, 910), 0, 0.35, (200, 220, 255), 1)
+                slope_baseline = (
+                    self.side_profile_slope_baseline
+                    if isinstance(self.side_profile_slope_baseline, dict) else {})
+                nose_upper_target = float(slope_baseline.get(
+                    "nose_upper_slope", SIDE_PROFILE_NOSE_UPPER_TARGET_SLOPE))
+                lip_chin_target = float(slope_baseline.get(
+                    "lip_chin_slope", SIDE_PROFILE_LIP_CHIN_TARGET_SLOPE))
+                slope_mode = "saved" if slope_baseline else "default"
+                cv2.putText(img,
+                           f"SP slope N-U={nose_upper_target:.2f} "
+                           f"U-C={lip_chin_target:.2f} "
+                           f"tol={SIDE_PROFILE_SLOPE_TOLERANCE:.2f} {slope_mode}",
+                           (x_off, 750), 0, 0.35, (200, 220, 255), 1)
+                cv2.putText(img,
+                           f"SP line L<={SIDE_PROFILE_LOWER_LINE_TOLERANCE_PX:.1f}px "
+                           f"C<={SIDE_PROFILE_CHIN_LINE_TOLERANCE_PX:.1f}px "
+                           f"A{SIDE_PROFILE_SAMPLE_FRAMES}t{SIDE_PROFILE_TRIM_FRAMES} "
+                           f"F{SIDE_PROFILE_PREVIEW_FILTER_FRAMES} J{SIDE_PROFILE_PREVIEW_MAX_JUMP_PX:.0f}",
+                           (x_off, 766), 0, 0.35, (200, 220, 255), 1)
 
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
@@ -717,19 +1021,28 @@ class EllSegDetector:
                     cv2.putText(img, text, pos, 0, 0.45, color, 1)
 
                 # 显示所有 MediaPipe 关键点
-                if self.show_all_landmarks and hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
+                if (self.show_face_overlays and self.show_all_landmarks
+                        and hasattr(self, '_last_lms_smooth')
+                        and self._last_lms_smooth is not None):
                     lms = self._last_lms_smooth
                     for i in range(lms.shape[0]):
                         px, py = int(lms[i, 0]), int(lms[i, 1])
                         cv2.circle(img, (px, py), 1, (180, 180, 255), -1)
                         cv2.putText(img, str(i), (px + 2, py - 1), 0,  0.4, (180, 180, 255), 1)
 
-                cv2.imshow("EllSeg Detect", img)
-
                 # 检测开关 HUD
-                status_str = f"[1]MP:{'ON' if self.enable_mp else 'OFF'}  [2]ELL:{'ON' if self.enable_ellseg else 'OFF'}  [3]LMS:{'ON' if self.show_all_landmarks else 'OFF'}"
+                status_str = (
+                    f"[1]MP:{'ON' if self.enable_mp else 'OFF'}  "
+                    f"[2]ELL:{'ON' if self.enable_ellseg else 'OFF'}  "
+                    f"[3]LMS:{'ON' if self.show_all_landmarks else 'OFF'}  "
+                    f"FaceDraw={'ON' if self.show_face_overlays else 'OFF'}  "
+                    f"SP4={'ON' if self.show_side_profile_preview else 'OFF'}  "
+                    f"SPDash={'ON' if self.show_side_profile_expected_slope else 'OFF'}  "
+                    f"SPGrid={'ON' if self.show_side_profile_coordinate_grid else 'OFF'}")
                 cv2.putText(img, status_str, (10, img.shape[0] - 8),
                            0, 0.4, (200, 200, 200), 1)
+
+                cv2.imshow("EllSeg Detect", img)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key:
@@ -794,7 +1107,9 @@ class EllSegDetector:
     # ---- 内部 ----
     def _make_result(self, frame, reason=""):
         return {"qualified": False, "offset": {},
-                "left_iris": None, "right_iris": None, "nose": None,
+                "left_iris": None, "right_iris": None,
+                "left_iris_ellipse": None, "right_iris_ellipse": None,
+                "lower_iris_cover": None, "nose": None,
                 "frame": frame, "reason": reason}
 
     def _calc_offset(self, det):
@@ -829,6 +1144,53 @@ class EllSegDetector:
             dist = np.sqrt(dx * dx + dy * dy)
             offset[key] = (dx, dy, dist)
         return offset
+
+    def _eyeball_head_adapter_offset(self, key):
+        adapter = self.head_adapter_baseline if isinstance(getattr(self, "head_adapter_baseline", None), dict) else None
+        if not adapter:
+            return (0.0, 0.0)
+        # Eye L/R here follows the user/servo semantics: L is screen-right,
+        # R is screen-left. head_position eye_right/eye_left are screen-based.
+        adapter_key = {
+            "left": "eye_right_offset",
+            "right": "eye_left_offset",
+            "nose": "nose_offset",
+        }.get(key)
+        if adapter_key is None:
+            return (0.0, 0.0)
+        value = adapter.get(adapter_key)
+        if value is None:
+            return (0.0, 0.0)
+        return (float(value[0]), float(value[1]))
+
+    def _calc_target_offset(self, det):
+        raw = self._calc_offset(det)
+        if not raw:
+            return {}
+        target_offset = {}
+        for key, value in raw.items():
+            if key.startswith("_"):
+                target_offset[key] = value
+                continue
+            dx, dy, _dist = value
+            ox, oy = self._eyeball_head_adapter_offset(key)
+            adj_dx = dx - ox
+            adj_dy = dy - oy
+            target_offset[key] = (adj_dx, adj_dy, float(np.sqrt(adj_dx * adj_dx + adj_dy * adj_dy)))
+        return target_offset
+
+    def _eyeball_target_mode(self):
+        return "head_adapter" if isinstance(getattr(self, "head_adapter_baseline", None), dict) else "raw"
+
+    def _eyeball_target_point(self, key):
+        if not self.baseline:
+            return None
+        key_map = {"left": "iris_left", "right": "iris_right", "nose": "nose"}
+        base_pos = self.baseline.get(key_map.get(key))
+        if base_pos is None:
+            return None
+        ox, oy = self._eyeball_head_adapter_offset(key)
+        return (float(base_pos[0]) + ox, float(base_pos[1]) + oy)
 
     def _is_qualified(self, offset):
         if not offset:
@@ -923,15 +1285,26 @@ class EllSegDetector:
                     ell_sm.reset()
                     continue
                 smooth_iris = ell_sm.update(iris)
-                (scx, scy), _, _ = smooth_iris
+                (scx, scy), (saw, sah), sang = smooth_iris
                 out[f"{side}_iris"] = (int(scx + x1), int(scy + y1))
+                out[f"{side}_iris_ellipse"] = (
+                    (float(scx + x1), float(scy + y1)),
+                    (float(saw), float(sah)),
+                    float(sang),
+                )
+
+        out["lower_iris_cover"] = self.get_lower_iris_cover_signal(
+            det=out, lms_smooth=lms_smooth)
 
         # 与基线比较
         offset = self._calc_offset(out)
+        target_offset = self._calc_target_offset(out)
         out["offset"] = offset
+        out["target_offset"] = target_offset
+        out["eyeball_target_mode"] = self._eyeball_target_mode()
 
-        if offset and self.baseline:
-            out["qualified"] = self._is_qualified(offset)
+        if target_offset and self.baseline:
+            out["qualified"] = self._is_qualified(target_offset)
         else:
             out["qualified"] = False
 
@@ -987,7 +1360,8 @@ class EllSegDetector:
 
     def _build_region_scores(self, det):
         rs = {"qualified": det.get("qualified", False)}
-        offset = det.get("offset", {})
+        offset = det.get("target_offset", det.get("offset", {}))
+        rs["eyeball_target_mode"] = det.get("eyeball_target_mode", "raw")
         for side, prefix in [("left", "L"), ("right", "R")]:
             off = offset.get(side)
             if off is not None:
@@ -1011,11 +1385,12 @@ class EllSegDetector:
         """
         if self.last_result is None:
             return None
-        offset = self.last_result.get("offset")
+        offset = self.last_result.get("target_offset", self.last_result.get("offset"))
         if not offset:
             return None
 
         guide = {}
+        guide["eyeball_target_mode"] = self.last_result.get("eyeball_target_mode", "raw")
         total_dist = 0.0
         for k, prefix in [("left", "L"), ("right", "R"), ("nose", "Nose")]:
             if k not in offset:
@@ -1102,6 +1477,191 @@ class EllSegDetector:
                 lms_smooth, RIGHT_EAR_PAIRS, RIGHT_EYE_CORNERS),
             "right": EllSegDetector._calc_ear(
                 lms_smooth, LEFT_EAR_PAIRS, LEFT_EYE_CORNERS),
+        }
+
+    def get_eyeball_lid_position_signal(self, det=None, lms_smooth=None):
+        """返回虹膜中心在上下眼皮之间的比例位置（上=0，下=1）。
+
+        L/R 遵循用户标记和舵机语义：L 是画面右侧眼，R 是画面左侧眼。
+        比例沿两组上眼皮点均值到两组下眼皮点均值的局部轴投影计算，
+        因此头部轻微倾斜时不会直接把屏幕 Y 值误当成眼内垂直位置。
+        此观察量不做截断，也不参与原始眼球 dx/dy 或通过判定。
+        """
+        if lms_smooth is None:
+            lms_smooth = getattr(self, "_last_lms_smooth", None)
+        if det is None:
+            det = self.last_result
+        if lms_smooth is None or not det:
+            return None
+
+        from eye_constants import LEFT_EAR_PAIRS, RIGHT_EAR_PAIRS
+
+        def position_ratio(iris_center, pairs):
+            if iris_center is None:
+                return None
+            upper = np.mean(
+                [np.asarray(lms_smooth[top_i], dtype=np.float64)
+                 for top_i, _ in pairs], axis=0)
+            lower = np.mean(
+                [np.asarray(lms_smooth[bottom_i], dtype=np.float64)
+                 for _, bottom_i in pairs], axis=0)
+            lid_axis = lower - upper
+            axis_len_sq = float(np.dot(lid_axis, lid_axis))
+            if axis_len_sq < 1e-6:
+                return None
+            iris = np.asarray(iris_center, dtype=np.float64)
+            return float(np.dot(iris - upper, lid_axis) / axis_len_sq)
+
+        return {
+            "left": position_ratio(det.get("left_iris"), RIGHT_EAR_PAIRS),
+            "right": position_ratio(det.get("right_iris"), LEFT_EAR_PAIRS),
+        }
+
+    def get_lower_iris_cover_signal(self, det=None, lms_smooth=None):
+        """判断虹膜理论下圆弧是否与下眼皮贴合，供 HUD 和独立上下调整使用。
+
+        EllSeg 椭圆用于推算完整虹膜边界，MediaPipe 下眼皮关键点通过
+        分段线性插值得到眼皮曲线。对椭圆下半弧逐点计算
+        ``理论圆弧 y - 下眼皮 y``。第 90 百分位作为有符号贴合偏差：
+        负值表示仍有空隙，0 表示贴合，正值表示下眼皮遮住过多。
+        通过条件要求偏差接近 0，且足够比例的下弧处在双向贴合容差内，
+        避免单个约 1px 的跳点误判。
+
+        L/R 遵循用户和舵机语义：L 是画面右侧眼，R 是画面左侧眼。
+        本信号不修改虹膜中心、原始 dx/dy 或眼球合格判断。
+        """
+        if lms_smooth is None:
+            lms_smooth = getattr(self, "_last_lms_smooth", None)
+        if det is None:
+            det = self.last_result
+        if lms_smooth is None or not det:
+            return None
+
+        from eye_constants import (
+            EYEBALL_LOWER_LID_CONTACT_ARC_MIN_RATIO,
+            EYEBALL_LOWER_LID_CONTACT_TOLERANCE,
+            LEFT_LOWER_LID_POINTS,
+            RIGHT_LOWER_LID_POINTS,
+        )
+
+        contact_tol = float(EYEBALL_LOWER_LID_CONTACT_TOLERANCE)
+        contact_arc_min = float(EYEBALL_LOWER_LID_CONTACT_ARC_MIN_RATIO)
+
+        def empty_measurement():
+            return {
+                "contact_offset_px": None,
+                "contact_offset_ratio": None,
+                "contact_arc_ratio": None,
+                "qualified": False,
+                "state": "--",
+                "arc_points": None,
+                "lid_curve_points": None,
+                "contact_mask": None,
+                "over_cover_mask": None,
+                "depth_segment": None,
+            }
+
+        def measure(ellipse, lower_lid_indices):
+            if ellipse is None:
+                return empty_measurement()
+
+            try:
+                (cx, cy), (axis_w, axis_h), angle_deg = ellipse
+                cx, cy = float(cx), float(cy)
+                radius_a = float(axis_w) * 0.5
+                radius_b = float(axis_h) * 0.5
+                angle = np.deg2rad(float(angle_deg))
+            except (TypeError, ValueError):
+                return empty_measurement()
+            if radius_a < 1e-6 or radius_b < 1e-6:
+                return empty_measurement()
+
+            theta = np.linspace(0.0, 2.0 * np.pi, 361, endpoint=False)
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            cos_a = np.cos(angle)
+            sin_a = np.sin(angle)
+            ellipse_x = cx + radius_a * cos_t * cos_a - radius_b * sin_t * sin_a
+            ellipse_y = cy + radius_a * cos_t * sin_a + radius_b * sin_t * cos_a
+
+            lid_points = np.asarray(
+                [lms_smooth[index] for index in lower_lid_indices],
+                dtype=np.float64,
+            )
+            order = np.argsort(lid_points[:, 0])
+            lid_x_sorted = lid_points[order, 0]
+            lid_y_sorted = lid_points[order, 1]
+            lid_x, inverse = np.unique(lid_x_sorted, return_inverse=True)
+            if lid_x.size < 2:
+                return empty_measurement()
+            lid_y = np.zeros(lid_x.size, dtype=np.float64)
+            lid_counts = np.zeros(lid_x.size, dtype=np.float64)
+            np.add.at(lid_y, inverse, lid_y_sorted)
+            np.add.at(lid_counts, inverse, 1.0)
+            lid_y /= np.maximum(lid_counts, 1.0)
+
+            lower_arc = (
+                (ellipse_y >= cy)
+                & (ellipse_x >= lid_x[0])
+                & (ellipse_x <= lid_x[-1])
+            )
+            if int(np.count_nonzero(lower_arc)) < 8:
+                return empty_measurement()
+
+            arc_x = ellipse_x[lower_arc]
+            arc_y = ellipse_y[lower_arc]
+            lower_lid_y = np.interp(arc_x, lid_x, lid_y)
+            arc_order = np.argsort(arc_x)
+            arc_x = arc_x[arc_order]
+            arc_y = arc_y[arc_order]
+            lower_lid_y = lower_lid_y[arc_order]
+            depths = arc_y - lower_lid_y
+            iris_height = float(np.max(ellipse_y) - np.min(ellipse_y))
+            if iris_height < 1e-6:
+                return empty_measurement()
+
+            robust_depth = float(np.percentile(depths, 90.0))
+            contact_mask = np.abs(depths) <= contact_tol
+            contact_arc_ratio = float(np.mean(contact_mask))
+            qualified = (
+                abs(robust_depth) <= contact_tol
+                and contact_arc_ratio >= contact_arc_min
+            )
+            if qualified:
+                state = "FIT"
+            elif robust_depth < -contact_tol:
+                state = "GAP"
+            elif robust_depth > contact_tol:
+                state = "COVER"
+            else:
+                state = "NARROW"
+            representative_index = int(np.argmin(np.abs(depths - robust_depth)))
+            return {
+                # 有符号：负=仍有空隙，0=贴合，正=下眼皮遮住过多。
+                "contact_offset_px": robust_depth,
+                "contact_offset_ratio": robust_depth / iris_height,
+                "contact_arc_ratio": contact_arc_ratio,
+                "qualified": qualified,
+                "state": state,
+                "arc_points": np.column_stack((arc_x, arc_y)),
+                "lid_curve_points": np.column_stack((arc_x, lower_lid_y)),
+                "contact_mask": contact_mask,
+                "over_cover_mask": depths > contact_tol,
+                "depth_segment": (
+                    (float(arc_x[representative_index]),
+                     float(lower_lid_y[representative_index])),
+                    (float(arc_x[representative_index]),
+                     float(arc_y[representative_index])),
+                ),
+            }
+
+        return {
+            "left": measure(
+                det.get("left_iris_ellipse"), RIGHT_LOWER_LID_POINTS),
+            "right": measure(
+                det.get("right_iris_ellipse"), LEFT_LOWER_LID_POINTS),
+            "contact_tolerance_px": contact_tol,
+            "contact_arc_min_ratio": contact_arc_min,
         }
 
     @staticmethod
@@ -1470,6 +2030,41 @@ class EllSegDetector:
     # 头部定位信号 — 鼻尖+眼线
     # ==================================================================
 
+    def get_eye_line_screen_signal(self, lms_smooth=None):
+        """
+        当前左右眼外角连线相对屏幕水平线的角度。
+
+        正值表示从左眼外角到右眼外角向下倾斜，屏幕坐标系里相当于顺时针。
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        from eye_constants import HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX, HEAD_TILT_TOLERANCE
+
+        eye_left = lms_smooth[HEAD_EYE_LEFT_IDX]
+        eye_right = lms_smooth[HEAD_EYE_RIGHT_IDX]
+        dx = float(eye_right[0] - eye_left[0])
+        dy = float(eye_right[1] - eye_left[1])
+        if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+            return None
+
+        angle_deg = float(np.degrees(np.arctan2(dy, dx)))
+        if angle_deg > 90.0:
+            angle_deg -= 180.0
+        elif angle_deg <= -90.0:
+            angle_deg += 180.0
+
+        return {
+            "left": (float(eye_left[0]), float(eye_left[1])),
+            "right": (float(eye_right[0]), float(eye_right[1])),
+            "mid_y": float((eye_left[1] + eye_right[1]) / 2.0),
+            "angle_deg": angle_deg,
+            "tolerance": HEAD_TILT_TOLERANCE,
+            "horizontal_ok": abs(angle_deg) <= HEAD_TILT_TOLERANCE,
+        }
+
     def get_head_signal(self, lms_smooth=None):
         """
         返回头部定位检查信号 — 基于鼻尖基线 + 眼线基准。
@@ -1491,16 +2086,30 @@ class EllSegDetector:
 
         from eye_constants import (
             HEAD_NOSE_IDX, HEAD_EYE_LEFT_IDX, HEAD_EYE_RIGHT_IDX,
+            HEAD_ADAPTER_POINT_TOLERANCE,
+            HEAD_POSITION_POINT_TOLERANCE,
             HEAD_NOSE_DX_TOLERANCE, HEAD_NOSE_DY_TOLERANCE,
             HEAD_TILT_TOLERANCE, HEAD_SYMMETRY_TOLERANCE,
         )
         bl = self.head_position_baseline
+        adapter = self.head_adapter_baseline if isinstance(getattr(self, "head_adapter_baseline", None), dict) else None
 
         # --- 鼻尖偏移 ---
         nose_cur = lms_smooth[HEAD_NOSE_IDX]
-        nose_dx = nose_cur[0] - bl["nose_px"][0]
-        nose_dy = nose_cur[1] - bl["nose_px"][1]
-        nose_dist = np.sqrt(nose_dx**2 + nose_dy**2)
+        eye_L_cur = lms_smooth[HEAD_EYE_LEFT_IDX]
+        eye_R_cur = lms_smooth[HEAD_EYE_RIGHT_IDX]
+        eye_L_bl = np.array(bl["eye_left"], dtype=np.float64)
+        eye_R_bl = np.array(bl["eye_right"], dtype=np.float64)
+        nose_delta = np.asarray(nose_cur[:2], dtype=np.float64) - np.array(bl["nose_px"], dtype=np.float64)
+        eye_left_delta = np.asarray(eye_L_cur[:2], dtype=np.float64) - eye_L_bl
+        eye_right_delta = np.asarray(eye_R_cur[:2], dtype=np.float64) - eye_R_bl
+        nose_dx = float(nose_delta[0])
+        nose_dy = float(nose_delta[1])
+        nose_dist = float(np.linalg.norm(nose_delta))
+        eye_left_dist = float(np.linalg.norm(eye_left_delta))
+        eye_right_dist = float(np.linalg.norm(eye_right_delta))
+        point_max_dist = float(max(nose_dist, eye_left_dist, eye_right_dist))
+        points_ok = point_max_dist <= HEAD_POSITION_POINT_TOLERANCE
         nose_ok = abs(nose_dx) <= HEAD_NOSE_DX_TOLERANCE and abs(nose_dy) <= HEAD_NOSE_DY_TOLERANCE
 
         # --- 眼线倾斜角 ---
@@ -1512,10 +2121,28 @@ class EllSegDetector:
         # 基线眼线角度
         bl_vec = eye_R_bl - eye_L_bl
         bl_angle = np.degrees(np.arctan2(bl_vec[1], bl_vec[0]))
+        if bl_angle > 90.0:
+            bl_angle -= 180.0
+        elif bl_angle <= -90.0:
+            bl_angle += 180.0
+        bl_slope = float(bl_vec[1] / bl_vec[0]) if abs(float(bl_vec[0])) > 1e-6 else None
+        bl_eye_dist = float(bl.get("eye_distance") or np.linalg.norm(bl_vec))
+        bl_eye_center = np.array(
+            bl.get("eye_center") or ((eye_L_bl + eye_R_bl) * 0.5),
+            dtype=np.float64,
+        )
         # 当前眼线角度
         cur_vec = np.array([eye_R_cur[0] - eye_L_cur[0],
                             eye_R_cur[1] - eye_L_cur[1]], dtype=np.float64)
         cur_angle = np.degrees(np.arctan2(cur_vec[1], cur_vec[0]))
+        if cur_angle > 90.0:
+            cur_angle -= 180.0
+        elif cur_angle <= -90.0:
+            cur_angle += 180.0
+        cur_slope = float(cur_vec[1] / cur_vec[0]) if abs(float(cur_vec[0])) > 1e-6 else None
+        cur_eye_dist = float(np.linalg.norm(cur_vec))
+        cur_eye_center = (np.asarray(eye_L_cur, dtype=np.float64) + np.asarray(eye_R_cur, dtype=np.float64)) * 0.5
+        eye_center_delta = cur_eye_center - bl_eye_center
         # 眼线倾斜: 正值=顺时针 (相对于基线)
         tilt_deg = cur_angle - bl_angle
         # 归一化到 (-180, 180]
@@ -1535,18 +2162,107 @@ class EllSegDetector:
         else:
             symmetry = 0.0
         symmetry_ok = abs(1.0 - symmetry) <= HEAD_SYMMETRY_TOLERANCE
+        slope_delta = None if cur_slope is None or bl_slope is None else cur_slope - bl_slope
+        adapter_active = adapter is not None
+        adapter_nose_delta = nose_delta
+        adapter_eye_left_delta = eye_left_delta
+        adapter_eye_right_delta = eye_right_delta
+        adapter_eye_center_delta = eye_center_delta
+        adapter_eye_distance_delta = cur_eye_dist - bl_eye_dist
+        adapter_angle_delta = tilt_deg
+        adapter_slope_delta = slope_delta
+        if adapter_active:
+            adapter_nose_delta = nose_delta - np.array(adapter.get("nose_offset", (0.0, 0.0)), dtype=np.float64)
+            adapter_eye_left_delta = eye_left_delta - np.array(adapter.get("eye_left_offset", (0.0, 0.0)), dtype=np.float64)
+            adapter_eye_right_delta = eye_right_delta - np.array(adapter.get("eye_right_offset", (0.0, 0.0)), dtype=np.float64)
+            adapter_eye_center_delta = eye_center_delta - np.array(adapter.get("eye_center_offset", (0.0, 0.0)), dtype=np.float64)
+            adapter_eye_distance_delta = (cur_eye_dist - bl_eye_dist) - float(adapter.get("eye_distance_offset", 0.0) or 0.0)
+            adapter_angle_delta = tilt_deg - float(adapter.get("eye_line_angle_offset_deg", 0.0) or 0.0)
+            slope_offset = adapter.get("eye_line_slope_offset")
+            adapter_slope_delta = None if slope_delta is None or slope_offset is None else slope_delta - float(slope_offset)
+
+        adapter_nose_dist = float(np.linalg.norm(adapter_nose_delta))
+        adapter_eye_left_dist = float(np.linalg.norm(adapter_eye_left_delta))
+        adapter_eye_right_dist = float(np.linalg.norm(adapter_eye_right_delta))
+        adapter_point_max_dist = float(max(adapter_nose_dist, adapter_eye_left_dist, adapter_eye_right_dist))
+        adapter_points_ok = adapter_point_max_dist <= HEAD_ADAPTER_POINT_TOLERANCE
 
         return {
             "nose_dx": float(nose_dx),
             "nose_dy": float(nose_dy),
             "nose_dist": float(nose_dist),
+            "eye_center": (float(cur_eye_center[0]), float(cur_eye_center[1])),
+            "baseline_eye_center": (float(bl_eye_center[0]), float(bl_eye_center[1])),
+            "eye_center_dx": float(eye_center_delta[0]),
+            "eye_center_dy": float(eye_center_delta[1]),
+            "eye_distance": cur_eye_dist,
+            "baseline_eye_distance": bl_eye_dist,
+            "eye_distance_delta": cur_eye_dist - bl_eye_dist,
+            "eye_line_angle_deg": float(cur_angle),
+            "baseline_eye_line_angle_deg": float(bl_angle),
+            "eye_line_angle_delta_deg": float(tilt_deg),
+            "eye_line_slope": cur_slope,
+            "baseline_eye_line_slope": bl_slope,
+            "eye_line_slope_delta": slope_delta,
+            "eye_left_dist": eye_left_dist,
+            "eye_right_dist": eye_right_dist,
+            "eye_left": (float(eye_L_cur[0]), float(eye_L_cur[1])),
+            "eye_right": (float(eye_R_cur[0]), float(eye_R_cur[1])),
+            "point_max_dist": point_max_dist,
+            "point_tolerance": HEAD_POSITION_POINT_TOLERANCE,
+            "adapter_active": adapter_active,
+            "adapter_point_tolerance": HEAD_ADAPTER_POINT_TOLERANCE,
+            "adapter_nose_dx": float(adapter_nose_delta[0]),
+            "adapter_nose_dy": float(adapter_nose_delta[1]),
+            "adapter_nose_dist": adapter_nose_dist,
+            "adapter_eye_center_dx": float(adapter_eye_center_delta[0]),
+            "adapter_eye_center_dy": float(adapter_eye_center_delta[1]),
+            "adapter_eye_distance_delta": float(adapter_eye_distance_delta),
+            "adapter_eye_line_angle_delta_deg": float(adapter_angle_delta),
+            "adapter_eye_line_slope_delta": adapter_slope_delta,
+            "adapter_eye_left_dist": adapter_eye_left_dist,
+            "adapter_eye_right_dist": adapter_eye_right_dist,
+            "adapter_point_max_dist": adapter_point_max_dist,
+            "adapter_points_ok": adapter_points_ok,
             "tilt_deg": float(tilt_deg),
             "symmetry": float(symmetry),
             "nose_ok": nose_ok,
+            "points_ok": points_ok,
             "tilt_ok": tilt_ok,
             "symmetry_ok": symmetry_ok,
-            "all_ok": nose_ok and tilt_ok and symmetry_ok,
+            "all_ok": (adapter_points_ok if adapter_active else points_ok) and nose_ok and tilt_ok and symmetry_ok,
         }
+
+    def save_current_head_adapter_baseline(self, lms_smooth=None):
+        """Save the current head shape offset relative to the template head_position."""
+        if self.head_position_baseline is None:
+            print("[HeadAdapter Baseline] Cannot save: no head_position baseline")
+            return False
+        signal = self.get_head_signal(lms_smooth)
+        if signal is None:
+            print("[HeadAdapter Baseline] Cannot save: no landmark data")
+            return False
+
+        adapter = {
+            "nose_offset": (signal["nose_dx"], signal["nose_dy"]),
+            "eye_left_offset": (
+                signal["eye_left"][0] - self.head_position_baseline["eye_left"][0],
+                signal["eye_left"][1] - self.head_position_baseline["eye_left"][1],
+            ),
+            "eye_right_offset": (
+                signal["eye_right"][0] - self.head_position_baseline["eye_right"][0],
+                signal["eye_right"][1] - self.head_position_baseline["eye_right"][1],
+            ),
+            "eye_center_offset": (signal["eye_center_dx"], signal["eye_center_dy"]),
+            "eye_distance_offset": signal["eye_distance_delta"],
+            "eye_line_angle_offset_deg": signal["eye_line_angle_delta_deg"],
+            "eye_line_slope_offset": signal["eye_line_slope_delta"],
+            "point_max_offset": signal["point_max_dist"],
+        }
+        self.head_adapter_baseline = adapter
+        save_head_adapter_baseline(adapter)
+        self.head_adapter_baseline = load_head_adapter_baseline()
+        return True
 
     def save_current_head_position_baseline(self, lms_smooth=None, n_frames=60, trim=20):
         """多帧采集取中位 → 保存头部位置基线 (抗抖动)。
@@ -1577,6 +2293,8 @@ class EllSegDetector:
                 nose_px=nose, eye_left_px=eye_l, eye_right_px=eye_r,
                 frame_width=self.width, frame_height=self.height,
             )
+            self.head_position_baseline = load_head_position_baseline()
+            self.head_adapter_baseline = load_head_adapter_baseline()
             return True
 
         # ---- 多帧采集抗抖动路径 ----
@@ -1658,6 +2376,8 @@ class EllSegDetector:
             nose_px=nose_px, eye_left_px=left_px, eye_right_px=right_px,
             frame_width=self.width, frame_height=self.height,
         )
+        self.head_position_baseline = load_head_position_baseline()
+        self.head_adapter_baseline = load_head_adapter_baseline()
 
         all_d = [d for d, _ in devs]
         med_d = all_d[len(all_d) // 2]
@@ -1697,10 +2417,11 @@ class EllSegDetector:
         bl = self.mouth_corners_baseline
         tol = MOUTH_CORNER_TOLERANCE
 
+        # 嘴角 L/R 与眼球保持一致：按用户标记/机器语义，不按 MediaPipe 原始左右。
         result = {}
         for side, idx, bl_key in [
-            ("left", MOUTH_CORNER_LEFT_IDX, "corner_left"),
-            ("right", MOUTH_CORNER_RIGHT_IDX, "corner_right"),
+            ("left", MOUTH_CORNER_RIGHT_IDX, "corner_left"),
+            ("right", MOUTH_CORNER_LEFT_IDX, "corner_right"),
         ]:
             cur = lms_smooth[idx]  # [x, y]
             base = bl[bl_key]      # (x, y)
@@ -1716,6 +2437,94 @@ class EllSegDetector:
 
         result["all_qualified"] = result["left"]["qualified"] and result["right"]["qualified"]
         return result
+
+    def get_mouth_corner_curl_signal(self, lms_smooth=None):
+        """
+        返回嘴角相对本侧内口裂点的上翘比例，不依赖保存的嘴角像素基线。
+
+        curl = (本侧内口裂点Y - 本侧外嘴角Y) / 嘴宽，数值越大表示嘴角越向上翘。
+        L/R 与眼球一致：按用户标记/机器语义，不按 MediaPipe 原始左右。
+        """
+        if lms_smooth is None:
+            if not hasattr(self, '_last_lms_smooth') or self._last_lms_smooth is None:
+                return None
+            lms_smooth = self._last_lms_smooth
+
+        from eye_constants import (
+            MOUTH_CORNER_LEFT_IDX, MOUTH_CORNER_RIGHT_IDX,
+            MOUTH_CORNER_CURL_MIN_TARGET, MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE,
+            MOUTH_CORNER_CURL_TARGET, MOUTH_CORNER_CURL_TOLERANCE,
+        )
+
+        # MediaPipe inner mouth corners are local side references, not a shared fitted centerline.
+        raw_left_inner = lms_smooth[78]
+        raw_right_inner = lms_smooth[308]
+        mouth_width = float(np.linalg.norm(raw_right_inner[:2] - raw_left_inner[:2]))
+        if mouth_width <= 1e-6:
+            return None
+
+        baseline = getattr(self, "mouth_corner_curl_baseline", None)
+        left_target = MOUTH_CORNER_CURL_TARGET
+        right_target = MOUTH_CORNER_CURL_TARGET
+        min_required = True
+        if isinstance(baseline, dict):
+            left_target = float(baseline.get("left_curl", left_target))
+            right_target = float(baseline.get("right_curl", right_target))
+            min_required = False
+
+        result = {}
+        for side, idx, local_ref in [
+            ("left", MOUTH_CORNER_RIGHT_IDX, raw_right_inner),
+            ("right", MOUTH_CORNER_LEFT_IDX, raw_left_inner),
+        ]:
+            corner = lms_smooth[idx]
+            curl_px = float(local_ref[1] - corner[1])
+            curl = curl_px / mouth_width
+            target = left_target if side == "left" else right_target
+            delta = curl - target
+            min_qualified = (curl >= MOUTH_CORNER_CURL_MIN_TARGET) if min_required else True
+            if min_required:
+                target_qualified = abs(delta) <= MOUTH_CORNER_CURL_TOLERANCE
+            else:
+                target_qualified = round(curl, 3) == round(target, 3)
+            result[side] = {
+                "curl": curl,
+                "curl_px": curl_px,
+                "delta": delta,
+                "target": target,
+                "ref": (float(local_ref[0]), float(local_ref[1])),
+                "min_qualified": min_qualified,
+                "target_qualified": target_qualified,
+                "qualified": min_qualified and target_qualified,
+            }
+
+        symmetry_delta = abs(result["left"]["curl"] - result["right"]["curl"])
+        symmetry_qualified = symmetry_delta <= MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE
+        result["mouth_width"] = mouth_width
+        result["min_target"] = MOUTH_CORNER_CURL_MIN_TARGET
+        result["min_required"] = min_required
+        result["tolerance"] = MOUTH_CORNER_CURL_TOLERANCE
+        result["symmetry_delta"] = symmetry_delta
+        result["symmetry_tolerance"] = MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE
+        result["symmetry_qualified"] = symmetry_qualified
+        result["all_qualified"] = result["left"]["qualified"] and result["right"]["qualified"] and symmetry_qualified
+        return result
+
+    def save_current_mouth_corner_curl_baseline(self, lms_smooth=None):
+        """Save the current mouth-corner curl ratio as the target for this template."""
+        signal = self.get_mouth_corner_curl_signal(lms_smooth)
+        if signal is None:
+            print("[MouthCornerCurl Baseline] Cannot save: no landmark data")
+            return False
+
+        left_curl = float(signal["left"]["curl"])
+        right_curl = float(signal["right"]["curl"])
+        self.mouth_corner_curl_baseline = {
+            "left_curl": left_curl,
+            "right_curl": right_curl,
+        }
+        save_mouth_corner_curl_baseline(left_curl=left_curl, right_curl=right_curl)
+        return True
 
     def save_current_mouth_corners_baseline(self, lms_smooth=None, n_frames=60, trim=20):
         """多帧采集取中位 → 保存嘴角基线 (抗抖动)。
@@ -1734,10 +2543,10 @@ class EllSegDetector:
             nose = (int(lms_smooth[NOSE_IDX, 0]), int(lms_smooth[NOSE_IDX, 1]))
             self.mouth_corners_baseline = {
                 "nose": nose,
-                "corner_left": (int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 0]),
-                                int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 1])),
-                "corner_right": (int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 0]),
-                                 int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 1])),
+                "corner_left": (int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 0]),
+                                int(lms_smooth[MOUTH_CORNER_RIGHT_IDX, 1])),
+                "corner_right": (int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 0]),
+                                 int(lms_smooth[MOUTH_CORNER_LEFT_IDX, 1])),
             }
             save_mouth_corners_baseline(
                 nose_pos=nose,
@@ -1777,10 +2586,10 @@ class EllSegDetector:
             no_face_count = 0
 
             nose_px = (int(lms[NOSE_IDX, 0]), int(lms[NOSE_IDX, 1]))
-            left_px = (int(lms[MOUTH_CORNER_LEFT_IDX, 0]),
-                       int(lms[MOUTH_CORNER_LEFT_IDX, 1]))
-            right_px = (int(lms[MOUTH_CORNER_RIGHT_IDX, 0]),
-                        int(lms[MOUTH_CORNER_RIGHT_IDX, 1]))
+            left_px = (int(lms[MOUTH_CORNER_RIGHT_IDX, 0]),
+                       int(lms[MOUTH_CORNER_RIGHT_IDX, 1]))
+            right_px = (int(lms[MOUTH_CORNER_LEFT_IDX, 0]),
+                        int(lms[MOUTH_CORNER_LEFT_IDX, 1]))
             frames_data.append((nose_px, left_px, right_px))
             collected += 1
 
@@ -2037,7 +2846,7 @@ if __name__ == "__main__":
 
     detector = EllSegDetector()
     detector.start_display()
-    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [M] Save mouth  [L] Save lower lip  [U] Save upper lip  [C] Save mouth corners  [D] Save head position  [V] Adjust baseline by eyeLine  [A] Save ALL  [G] Toggle baseline overlay  [Y] Toggle eyeLine HUD  [1] Toggle MP  [2] Toggle EllSeg  [3] Toggle Landmarks  [Q] Quit")
+    print("\n[S] Save eyeball  [E] Save eyelid  [B] Save eyebrow  [M] Save mouth  [L] Save lower lip  [U] Save upper lip  [C] Save mouth corners  [K] Save mouth curl  [D] Save head position  [O] Save head offset  [V] Adjust baseline by eyeLine  [A] Save ALL  [G] Toggle baseline overlay  [Y] Toggle eyeLine HUD  [1] Toggle MP  [2] Toggle EllSeg  [3] Toggle Landmarks  [Q] Quit")
 
     if raw_test:
         print("\n[Raw FPS Test] 仅测量摄像头原始读取帧率 (跳过 MediaPipe + EllSeg)...")
@@ -2087,9 +2896,15 @@ if __name__ == "__main__":
             if last in (ord('c'), ord('C')):
                 detector.save_current_mouth_corners_baseline()
                 detector._last_key = None
+            if last in (ord('k'), ord('K')):
+                detector.save_current_mouth_corner_curl_baseline()
+                detector._last_key = None
             # 检测 D 键保存头部定位基线
             if last in (ord('d'), ord('D')):
                 detector.save_current_head_position_baseline()
+                detector._last_key = None
+            if last in (ord('o'), ord('O')):
+                detector.save_current_head_adapter_baseline()
                 detector._last_key = None
             # 检测 V 键：用参考线垂直偏移永久调整基线
             if last in (ord('v'), ord('V')):
@@ -2105,6 +2920,7 @@ if __name__ == "__main__":
                 detector.save_current_lower_lip_baseline()
                 detector.save_current_upper_lip_baseline()
                 detector.save_current_mouth_corners_baseline()
+                detector.save_current_mouth_corner_curl_baseline()
                 detector.save_current_head_position_baseline()
                 print("=== 全部基线保存完成 ===\n")
                 detector._last_key = None

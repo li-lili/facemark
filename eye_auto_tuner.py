@@ -24,9 +24,14 @@ from Motor import FaceController
 from Communication import UARTDevice
 from utility import read_yaml, write_yaml
 from eye_auto_lip_side import LipSideSamplingMixin
+from servo_motion_rules import ServoMotionRules, DEFAULT_SERVO_MOTION_RULES_FILE
 from eye_constants import (
     EYE_SERVO_CHANNELS, EYE_SERVO_NAMES,
     EYEBALL_CHANNELS, EYELID_CHANNELS,     EYEBROW_CHANNELS, EYEBROW_NAMES,
+    EYEBALL_LOWER_LID_CONTACT_ARC_MIN_RATIO,
+    EYEBALL_LOWER_LID_CONTACT_SAMPLE_FRAMES,
+    EYEBALL_LOWER_LID_CONTACT_TOLERANCE,
+    EYEBALL_LOWER_LID_CONTACT_TRIM_FRAMES,
     EYEBROW_CUSTOM_BIG_TOLERANCE,
     EYEBROW_BIG_SYMMETRY_TOLERANCE,
     EYEBROW_WAIT_SECONDS, EYEBROW_MAX_ITERATIONS,
@@ -53,6 +58,10 @@ from eye_constants import (
     UPPER_LIP_SIDE_SPLIT_PCT, UPPER_LIP_SIDE_MIN_AREA,
     MOUTH_CORNER_TOLERANCE,
     MOUTH_CORNER_Y_TOLERANCE,
+    MOUTH_CORNER_CURL_MIN_TARGET,
+    MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE,
+    MOUTH_CORNER_CURL_TARGET,
+    MOUTH_CORNER_CURL_TOLERANCE,
     MOUTH_CORNER_WAIT_SECONDS, MOUTH_CORNER_MAX_ITERATIONS,
     MOUTH_CORNER_H_CHANNELS, MOUTH_CORNER_V_CHANNELS,
 )
@@ -76,6 +85,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
         stabilize_frames: int = 8,
         settle_time_ms: int = 300,
         detector: EllSegDetector = None,
+        motion_rules_file: str = DEFAULT_SERVO_MOTION_RULES_FILE,
     ):
         self.yaml_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), yaml_file)
         self.port = port
@@ -83,6 +93,8 @@ class EyeAutoTuner(LipSideSamplingMixin):
         self.servo_num = servo_num
         self.stabilize_frames = stabilize_frames
         self.settle_time_ms = settle_time_ms
+        self.motion_rules_file = motion_rules_file
+        self.motion_rules = ServoMotionRules(motion_rules_file)
 
         # 外部传入的 detector（qt_calibration_panel 共享相机）
         self.external_detector = detector
@@ -94,6 +106,11 @@ class EyeAutoTuner(LipSideSamplingMixin):
         self.angle_ranges = [(DEFAULT_ANGLE_MIN, DEFAULT_ANGLE_MAX)] * len(EYE_SERVO_CHANNELS)
         self.side_cap = None
         self._owns_side_cap = False
+        # Qt 面板可注入回调，实时接收最后成功发送的全部舵机角度。
+        self.servo_values_callback = None
+
+    def _motion_delta(self, channel: int, desired_effect: str, step: float = 1.0) -> float:
+        return self.motion_rules.angle_delta(channel, desired_effect, step)
 
     # ------------------------------------------------------------------
     # 安全读取 list_temp_deg (list 没有 .get 方法)
@@ -199,6 +216,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
         # 记录已发送角度，避免下一次 UI 手动/自动动作又从 YAML temp_deg 起步。
         if 0 <= channel < len(self.controller.list_temp_deg):
             self.controller.list_temp_deg[channel] = angle
+        self._notify_servo_values()
         print(f"[SERVO][OK] A{channel}={angle} port={self.port}")
         return True
 
@@ -223,8 +241,18 @@ class EyeAutoTuner(LipSideSamplingMixin):
         for ch, ang in zip(channels, clamped_angles):
             if 0 <= ch < len(self.controller.list_temp_deg):
                 self.controller.list_temp_deg[ch] = ang
+        self._notify_servo_values()
         print(f"[SERVO][OK] {items} port={self.port}")
         return True
+
+    def _notify_servo_values(self) -> None:
+        callback = getattr(self, "servo_values_callback", None)
+        if callback is None or self.controller is None:
+            return
+        try:
+            callback(list(self.controller.list_temp_deg))
+        except Exception as exc:
+            print(f"[WARN] servo value callback failed: {exc}")
 
     def capture_and_score(self):
         """等待舵机稳定后采集检测（EllSeg 虹膜偏移）"""
@@ -474,14 +502,31 @@ class EyeAutoTuner(LipSideSamplingMixin):
                 if abs(r_dy) <= TOLERANCE:
                     r_adj_y = 0.0
 
-                # A10: L_vertical 上下 (减=下)  |  A11: R_vertical 上下 (减=下, 物理反向)
-                # A12/A13: 水平方向按 raw dX 直接映射，只改舵机动作，不改 raw dx/dy。
-                # L dX+ -> A12+, L dX- -> A12-; R dX+ -> A13+, R dX- -> A13-.
+                # 方向由 servo_motion_rules.yaml 决定，只改舵机动作，不改 raw dx/dy。
+                def effect_delta(ch, effect, value):
+                    return self._motion_delta(ch, effect) if value != 0 else 0.0
+
                 adj_map = {
-                    EYEBALL_CHANNELS[0]:  1.0 if l_adj_y < 0 else (-1.0 if l_adj_y > 0 else 0.0),
-                    EYEBALL_CHANNELS[1]: -1.0 if r_adj_y < 0 else ( 1.0 if r_adj_y > 0 else 0.0),
-                    EYEBALL_CHANNELS[2]:  1.0 if l_adj_x < 0 else (-1.0 if l_adj_x > 0 else 0.0),
-                    EYEBALL_CHANNELS[3]:  1.0 if r_adj_x < 0 else (-1.0 if r_adj_x > 0 else 0.0),
+                    EYEBALL_CHANNELS[0]: effect_delta(
+                        EYEBALL_CHANNELS[0],
+                        "上" if l_adj_y < 0 else "下",
+                        l_adj_y,
+                    ),
+                    EYEBALL_CHANNELS[1]: effect_delta(
+                        EYEBALL_CHANNELS[1],
+                        "上" if r_adj_y < 0 else "下",
+                        r_adj_y,
+                    ),
+                    EYEBALL_CHANNELS[2]: effect_delta(
+                        EYEBALL_CHANNELS[2],
+                        "内" if l_adj_x < 0 else "外",
+                        l_adj_x,
+                    ),
+                    EYEBALL_CHANNELS[3]: effect_delta(
+                        EYEBALL_CHANNELS[3],
+                        "外" if r_adj_x < 0 else "内",
+                        r_adj_x,
+                    ),
                 }
 
                 move_channels = []
@@ -533,6 +578,330 @@ class EyeAutoTuner(LipSideSamplingMixin):
         finally:
             if not keep_display:
                 self.scorer.stop_display()
+
+    def auto_adjust_iris_lid_contact(
+        self,
+        step: float = 1.0,
+        max_iterations: int = 100,
+        wait_seconds: float = 1.0,
+        sample_frames: int = EYEBALL_LOWER_LID_CONTACT_SAMPLE_FRAMES,
+        trim_frames: int = EYEBALL_LOWER_LID_CONTACT_TRIM_FRAMES,
+        keep_display: bool = False,
+        log_func=None,
+    ) -> Tuple[bool, int, dict]:
+        """仅用左右眼各自的虹膜下弧贴合值调整 A10/A11。
+
+        L 只控制 A10，R 只控制 A11；两侧分别做修剪平均，不互相混合。
+        某一侧第一次达到贴合条件后即锁定，后续迭代不再移动该侧。
+        """
+        sample_frames = max(3, int(sample_frames))
+        trim_frames = max(0, int(trim_frames))
+        if sample_frames <= 2 * trim_frames:
+            raise ValueError("sample_frames 必须大于 2 * trim_frames")
+
+        vertical_channels = {"left": EYEBALL_CHANNELS[0], "right": EYEBALL_CHANNELS[1]}
+        side_labels = {"left": "L", "right": "R"}
+        current_angles = {}
+        for side, channel in vertical_channels.items():
+            low, high = self._angle_range(channel)
+            current_angles[side] = self._temp_deg(channel, default=(low + high) / 2.0)
+
+        locked = {"left": False, "right": False}
+        final_measurements = {"left": None, "right": None}
+        stop_reason = "max_iterations"
+        sleep_chunk = 0.1
+
+        def emit(message: str) -> None:
+            print(message)
+            if log_func is not None:
+                log_func(message)
+
+        def wait_after_move() -> bool:
+            waited = 0.0
+            while waited < wait_seconds:
+                if self.scorer.user_pressed_stop:
+                    return False
+                duration = min(sleep_chunk, wait_seconds - waited)
+                time.sleep(duration)
+                waited += duration
+            return True
+
+        def collect_trimmed_signal():
+            """左右眼分别排序、裁掉两端异常帧，再计算各自平均值。"""
+            required_sides = [side for side in vertical_channels if not locked[side]]
+            samples = {side: [] for side in required_sides}
+            max_attempts = max(sample_frames * 6, sample_frames + 20)
+
+            for _attempt in range(max_attempts):
+                if self.scorer.user_pressed_stop:
+                    return None
+                ok, frame = self.scorer.capture()
+                if not ok:
+                    time.sleep(0.01)
+                    continue
+                detection = self.scorer.detect(frame)
+                signal = detection.get("lower_iris_cover") if detection else None
+                if signal:
+                    for side in required_sides:
+                        if len(samples[side]) >= sample_frames:
+                            continue
+                        measurement = signal.get(side) or {}
+                        offset = measurement.get("contact_offset_px")
+                        arc_ratio = measurement.get("contact_arc_ratio")
+                        if offset is None or arc_ratio is None:
+                            continue
+                        samples[side].append({
+                            "offset": float(offset),
+                            "arc_ratio": float(arc_ratio),
+                            "measurement": measurement,
+                        })
+
+                    progress_lines = [
+                        (f"[IrisLid AVG {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    ]
+                    for row, side in enumerate(vertical_channels, start=1):
+                        if locked[side]:
+                            progress = "LOCK"
+                            color = (0, 255, 0)
+                        else:
+                            progress = f"sampling {len(samples[side])}/{sample_frames}"
+                            color = (200, 200, 200)
+                        progress_lines.append((
+                            f"{side_labels[side]} {progress}",
+                            (10, 100 + row * 18),
+                            color,
+                        ))
+                    self.scorer.update_hud(progress_lines)
+
+                    if all(len(samples[side]) >= sample_frames for side in required_sides):
+                        break
+                time.sleep(0.01)
+
+            if any(len(samples[side]) < sample_frames for side in required_sides):
+                return None
+
+            averaged = {}
+            for side in vertical_channels:
+                if locked[side]:
+                    averaged[side] = final_measurements[side] or {}
+                    continue
+
+                ordered = sorted(samples[side], key=lambda item: item["offset"])
+                kept = ordered[trim_frames:len(ordered) - trim_frames] if trim_frames else ordered
+                avg_offset = sum(item["offset"] for item in kept) / len(kept)
+                avg_arc_ratio = sum(item["arc_ratio"] for item in kept) / len(kept)
+                qualified = (
+                    abs(avg_offset) <= EYEBALL_LOWER_LID_CONTACT_TOLERANCE
+                    and avg_arc_ratio >= EYEBALL_LOWER_LID_CONTACT_ARC_MIN_RATIO
+                )
+                if qualified:
+                    state = "FIT"
+                elif avg_offset < -EYEBALL_LOWER_LID_CONTACT_TOLERANCE:
+                    state = "GAP"
+                elif avg_offset > EYEBALL_LOWER_LID_CONTACT_TOLERANCE:
+                    state = "COVER"
+                else:
+                    state = "NARROW"
+
+                representative = min(kept, key=lambda item: abs(item["offset"] - avg_offset))
+                measurement = dict(representative["measurement"])
+                measurement.update({
+                    "contact_offset_px": avg_offset,
+                    "contact_arc_ratio": avg_arc_ratio,
+                    "qualified": qualified,
+                    "state": state,
+                    "sample_count": sample_frames,
+                    "trim_count_each_end": trim_frames,
+                    "averaged_count": len(kept),
+                })
+                averaged[side] = measurement
+            return averaged
+
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = True
+        self.scorer.show_iris_cover_overlay = True
+        self.scorer.start_display()
+        emit(
+            f">>> 调整眼球上下贴合：L=A10，R=A11；左右独立修剪平均 "
+            f"{sample_frames} 帧，去掉最低/最高各 {trim_frames} 帧 <<<"
+        )
+
+        iteration = 0
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                if self.scorer.user_pressed_stop:
+                    stop_reason = "user_stop"
+                    break
+
+                signal = collect_trimmed_signal()
+                if signal is None:
+                    emit(
+                        f"[眼球上下贴合 {iteration}/{max_iterations}] "
+                        f"未收齐每侧 {sample_frames} 个有效帧，本轮不移动"
+                    )
+                    self.scorer.update_hud([
+                        (f"[IrisLid AVG {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        ("L: no signal", (10, 118), (0, 160, 255)),
+                        ("R: no signal", (10, 136), (0, 160, 255)),
+                    ])
+                    if not wait_after_move():
+                        stop_reason = "user_stop"
+                        break
+                    continue
+
+                actions = {}
+                hud_lines = [
+                    (f"[IrisLid AVG {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ]
+
+                for side in vertical_channels:
+                    measurement = signal.get(side) or {}
+                    offset = measurement.get("contact_offset_px")
+                    if offset is not None:
+                        final_measurements[side] = measurement
+                    if not locked[side] and bool(measurement.get("qualified")):
+                        locked[side] = True
+                        emit(
+                            f"[眼球上下贴合] {side_labels[side]} 已到位并锁定："
+                            f"修剪平均 {offset:+.2f}px，后续不再移动该侧"
+                        )
+
+                average_log = []
+                for side in vertical_channels:
+                    measurement = final_measurements[side] or {}
+                    offset = measurement.get("contact_offset_px")
+                    arc_ratio = measurement.get("contact_arc_ratio")
+                    if offset is None or arc_ratio is None:
+                        average_log.append(f"{side_labels[side]}=--")
+                    else:
+                        average_log.append(
+                            f"{side_labels[side]}={offset:+.2f}px/"
+                            f"{arc_ratio * 100.0:.0f}% {measurement.get('state', '--')}"
+                            f"{' LOCK' if locked[side] else ''}"
+                        )
+                emit(
+                    f"[眼球上下贴合 {iteration}/{max_iterations}] 修剪平均："
+                    f"{' | '.join(average_log)}"
+                )
+
+                if all(locked.values()):
+                    stop_reason = "qualified"
+                    for row, side in enumerate(vertical_channels, start=1):
+                        measurement = final_measurements[side] or {}
+                        offset = measurement.get("contact_offset_px")
+                        text_offset = "--" if offset is None else f"{offset:+.2f}px"
+                        hud_lines.append((
+                            f"{side_labels[side]} {text_offset} FIT A{vertical_channels[side]}={current_angles[side]} LOCK",
+                            (10, 100 + row * 18),
+                            (0, 255, 0),
+                        ))
+                    self.scorer.update_hud(hud_lines)
+                    emit(f"[眼球上下贴合] 左右眼均已到位，共 {iteration} 次迭代")
+                    return True, iteration, {
+                        "left": final_measurements["left"],
+                        "right": final_measurements["right"],
+                        "locked": dict(locked),
+                        "stop_reason": stop_reason,
+                    }
+
+                move_channels = []
+                move_angles = []
+                move_ranges = []
+
+                for row, side in enumerate(vertical_channels, start=1):
+                    channel = vertical_channels[side]
+                    measurement = final_measurements[side] or {}
+                    offset = measurement.get("contact_offset_px")
+                    state = str(measurement.get("state", "--"))
+                    color = (0, 255, 0) if locked[side] else (0, 255, 255)
+
+                    if locked[side]:
+                        action_text = "LOCK"
+                    elif offset is None:
+                        action_text = "NO SIGNAL"
+                        color = (0, 160, 255)
+                    elif offset < 0.0:
+                        # 眼球下弧在眼皮上方：眼球需要向下贴近下眼皮。
+                        actions[side] = "下"
+                        action_text = "DOWN"
+                    elif offset > 0.0:
+                        # 下眼皮遮住眼球过多：眼球需要向上离开下眼皮。
+                        actions[side] = "上"
+                        action_text = "UP"
+                    else:
+                        # 偏差正好为 0 但接触弧仍不足，无法确定安全移动方向。
+                        action_text = "NO DIR"
+                        color = (0, 160, 255)
+
+                    text_offset = "--" if offset is None else f"{offset:+.2f}px"
+                    hud_lines.append((
+                        f"{side_labels[side]} {text_offset} {state} A{channel}={current_angles[side]} {action_text}",
+                        (10, 100 + row * 18),
+                        color,
+                    ))
+
+                for side, desired_effect in actions.items():
+                    channel = vertical_channels[side]
+                    low, high = self._angle_range(channel)
+                    delta = self._motion_delta(channel, desired_effect, step)
+                    new_angle = max(low, min(high, round(current_angles[side] + delta)))
+                    if new_angle == current_angles[side]:
+                        emit(
+                            f"[眼球上下贴合 {iteration}/{max_iterations}] {side_labels[side]} "
+                            f"A{channel} 已到范围边界 {current_angles[side]}，仍未贴合"
+                        )
+                        continue
+                    move_channels.append(channel)
+                    move_angles.append(new_angle)
+                    move_ranges.append((low, high))
+
+                self.scorer.update_hud(hud_lines)
+
+                if move_channels:
+                    sent = self.send_servos(move_channels, move_angles, move_ranges)
+                    if not sent:
+                        stop_reason = "serial_send_failed"
+                        emit(f"[眼球上下贴合 {iteration}/{max_iterations}] 舵机命令发送失败")
+                        break
+                    for channel, angle in zip(move_channels, move_angles):
+                        side = "left" if channel == vertical_channels["left"] else "right"
+                        current_angles[side] = angle
+                    move_log = " ".join(
+                        f"{side_labels[side]} A{vertical_channels[side]} {actions[side]} -> {current_angles[side]}"
+                        for side in actions
+                        if vertical_channels[side] in move_channels
+                    )
+                    emit(f"[眼球上下贴合 {iteration}/{max_iterations}] {move_log}")
+                elif not all(locked.values()):
+                    stop_reason = "no_legal_move"
+                    emit("[眼球上下贴合] 未合格侧没有可确定的安全移动方向，停止调整")
+                    break
+
+                if not wait_after_move():
+                    stop_reason = "user_stop"
+                    break
+
+            emit(
+                f"[眼球上下贴合] 未通过：{iteration} 次迭代，"
+                f"L={'到位' if locked['left'] else '未到位'}，"
+                f"R={'到位' if locked['right'] else '未到位'}，原因={stop_reason}"
+            )
+            return False, iteration, {
+                "left": final_measurements["left"],
+                "right": final_measurements["right"],
+                "locked": dict(locked),
+                "stop_reason": stop_reason,
+                "warning": "未合格侧已到舵机边界或当前贴合信号无法确定安全方向"
+                if stop_reason == "no_legal_move" else "",
+            }
+        finally:
+            # 调整结束后保持检测和摄像头运行；只按调用方要求决定是否关闭显示窗。
+            self.scorer.enable_mp = True
+            self.scorer.enable_ellseg = True
+            if not keep_display:
+                self.scorer.stop_display()
+
     def auto_adjust_upper_lip_front_side(
         self,
         step: float = 1.0,
@@ -564,8 +933,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
         side_range = self._angle_range(ch_side)
         front_angle = self._temp_deg(ch_front, default=round(sum(front_range) / 2))
         side_angle = self._temp_deg(ch_side, default=round(sum(side_range) / 2))
-        front_sign = getattr(self, "_upper_lip_flip", 1)
-        side_sign = getattr(self, "_upper_lip_side_flip", 1)
 
         print("=" * 60)
         print("  Upper lip auto adjust: front ULR + side front point")
@@ -631,16 +998,16 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
                 moved = False
                 if not front_ok:
-                    front_dir = -1 if front_delta > UPPER_LIP_ULR_TOLERANCE else 1
-                    new_front = round(front_angle + front_sign * front_dir * step)
+                    desired_effect = "上" if front_delta > UPPER_LIP_ULR_TOLERANCE else "下"
+                    new_front = round(front_angle + self._motion_delta(ch_front, desired_effect, step))
                     new_front = max(front_range[0], min(front_range[1], new_front))
                     if new_front != front_angle:
                         front_angle = new_front
                         moved = True
                 elif side_y_out:
                     # 正面达标但侧面 y 超差时允许 A16 小步补偿；若下一轮 ULR 出界，会优先按正面纠正。
-                    front_dir = -1 if side_dy > UPPER_LIP_SIDE_Y_TOLERANCE else 1
-                    new_front = round(front_angle + front_dir * step)
+                    desired_effect = "上" if side_dy > UPPER_LIP_SIDE_Y_TOLERANCE else "下"
+                    new_front = round(front_angle + self._motion_delta(ch_front, desired_effect, step))
                     new_front = max(front_range[0], min(front_range[1], new_front))
                     if new_front != front_angle:
                         front_angle = new_front
@@ -651,9 +1018,8 @@ class EyeAutoTuner(LipSideSamplingMixin):
                         }
 
                 if not side_ok and abs(side_dx) > UPPER_LIP_SIDE_X_TOLERANCE:
-                    # A17: 前=165, 后=200. side_dx>0 表示上唇前点太靠前，需增大角度往后。
-                    side_dir = 1 if side_dx > UPPER_LIP_SIDE_X_TOLERANCE else -1
-                    new_side = round(side_angle + side_sign * side_dir * step)
+                    desired_effect = "后" if side_dx > UPPER_LIP_SIDE_X_TOLERANCE else "前"
+                    new_side = round(side_angle + self._motion_delta(ch_side, desired_effect, step))
                     new_side = max(side_range[0], min(side_range[1], new_side))
                     if new_side != side_angle:
                         side_angle = new_side
@@ -765,12 +1131,12 @@ class EyeAutoTuner(LipSideSamplingMixin):
         avg["eyelid_symmetry"] = abs(avg["left_ear"] - avg["right_ear"])
         avg["left_qualified"] = abs(avg["left_delta"]) <= tol
         avg["right_qualified"] = abs(avg["right_delta"]) <= tol
-        avg["symmetry_qualified"] = avg["eyelid_symmetry"] <= tol
+        # 眼皮自动调整暂时不看对称度；保留原始数值，合格判断固定放行，便于以后恢复。
+        avg["symmetry_qualified"] = True
 
         all_devs = [s[0] for s in samples]
         print(f"  [Eyelid Collect] {len(samples)} frames, trim {trim}: "
               f"L_delta={avg['left_delta']:+.4f} R_delta={avg['right_delta']:+.4f} "
-              f"Sym={avg['eyelid_symmetry']:.4f} "
               f"(min={all_devs[0]:.4f}, max={all_devs[-1]:.4f})")
 
         return avg
@@ -787,18 +1153,17 @@ class EyeAutoTuner(LipSideSamplingMixin):
         keep_display: bool = False,
     ) -> tuple:
         """
-        引导式自动调整 — 两阶段眼皮 A8/A9 舵机。
+        引导式自动调整 — 眼皮 A8/A9 舵机。
 
-        Phase 1 (各自达标): 左右眼皮各自回到自己的 EAR 基线通过区间
-        Phase 2 (对称): 高宽比更高的一侧向更低的一侧靠
+        左右眼皮各自回到自己的 EAR 基线通过区间即通过。
+        对称度暂时不参与调整/通过判定。
 
         流程（每轮迭代）:
           1. 打开 MP（仅 MediaPipe 关键点）
           2. 采集 60 帧 → 去头尾求平均 EAR
           3. 关闭 MP
           4. P1: 若单侧 EAR 偏离基线容差 → 该侧单独开/合
-          5. P1 通过后进入 P2: 若 |L_EAR - R_EAR| > 对称容差 → 合上 EAR 更高侧
-          6. 全部达标 → 通过
+          5. 左右各自达标 → 通过
 
         Args:
             ear_step:       每次调整的舵机角度步长 (默认 1°)
@@ -818,12 +1183,10 @@ class EyeAutoTuner(LipSideSamplingMixin):
             return False, 0, {}
 
         tol = EYELID_EAR_TOLERANCE
-        sym_tol = EYELID_EAR_TOLERANCE  # 对称容差与 EAR 容差相同
 
         print(f"{'='*60}")
-        print(f"  引导式自动调整 (仅眼皮 A8-A9) — 两阶段")
-        print(f"  Phase 1: 各自达标 (|L_delta|、|R_delta| ≤ {tol})")
-        print(f"  Phase 2: 左右对称 (|L_EAR - R_EAR| ≤ {sym_tol})")
+        print(f"  引导式自动调整 (仅眼皮 A8-A9) — 暂不看对称度")
+        print(f"  目标: 各自达标 (|L_delta|、|R_delta| ≤ {tol})")
         print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均 EAR")
         print(f"  步长: {ear_step}度/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
         bl = self.scorer.eyelid_baseline
@@ -838,11 +1201,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
         }
         print(f"  初始角度: {dict(zip(EYELID_NAMES, [current_angles[c] for c in EYELID_CHANNELS]))}")
 
-        a8_sign = getattr(self, '_eyelid_a8_flip', -1)
-        a9_sign = getattr(self, '_eyelid_a9_flip', 1)
-
         iteration = 0
-        phase = 1  # start in Phase 1 (各自达标)
         sleep_chunk = 0.1
 
         try:
@@ -854,7 +1213,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
                     break
 
                 self.scorer.update_hud([
-                    (f"[Eyelid P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                 ])
 
                 # ---- 采集 EAR ----
@@ -862,10 +1221,10 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
                 if avg_signal is None:
                     self.scorer.update_hud([
-                        (f"[Eyelid P{phase} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                        (f"[Eyelid Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                         (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
                     ])
-                    print(f"  [Eyelid P{phase} Iter {iteration:3d}] 无法获取有效帧")
+                    print(f"  [Eyelid Iter {iteration:3d}] 无法获取有效帧")
                     _waited = 0
                     while _waited < wait_seconds:
                         time.sleep(min(sleep_chunk, wait_seconds - _waited))
@@ -879,29 +1238,24 @@ class EyeAutoTuner(LipSideSamplingMixin):
                 l_ear = avg_signal["left_ear"]
                 r_ear = avg_signal["right_ear"]
 
-                # 对称性: 左右当前 EAR 高宽比差异。
-                ear_sym = avg_signal["eyelid_symmetry"]
-                sym_ok = avg_signal["symmetry_qualified"]
-
-                print(f"  [Eyelid P{phase} Iter {iteration:3d}] "
+                print(f"  [Eyelid Iter {iteration:3d}] "
                       f"L_EAR={l_ear:.4f} (Δ={l_delta:+.4f}) "
-                      f"R_EAR={r_ear:.4f} (Δ={r_delta:+.4f}) "
-                      f"Sym={ear_sym:.4f}")
+                      f"R_EAR={r_ear:.4f} (Δ={r_delta:+.4f})")
 
                 # ---- update_hud: 只显示调整专有信息，基本参数由 cv2.putText 常驻 ----
-                phase_label = "P1:各自" if phase == 1 else "P2:对称"
+                phase_label = "各自达标"
 
                 self.scorer.update_hud([
                     (f"[Eyelid {phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                     (f"A8={current_angles[EYELID_CHANNELS[0]]}° A9={current_angles[EYELID_CHANNELS[1]]}°", (10, 118), (200, 200, 200)),
                 ])
 
-                # ---- 检查两阶段全部合格 ----
+                # ---- 检查左右各自是否合格；对称度暂时不参与 ----
                 l_ok = abs(l_delta) <= tol
                 r_ok = abs(r_delta) <= tol
-                if phase == 2 and sym_ok and l_ok and r_ok:
+                if l_ok and r_ok:
                     print(f"\n{'='*60}")
-                    print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次 (Phase 2)")
+                    print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次")
                     print(f"      L_EAR={l_ear:.4f}  R_EAR={r_ear:.4f}")
                     final_ang = " ".join([f"{n}={current_angles[c]}度"
                                          for n, c in zip(EYELID_NAMES, EYELID_CHANNELS)])
@@ -922,131 +1276,58 @@ class EyeAutoTuner(LipSideSamplingMixin):
                     return True, iteration, avg_signal
 
                 # ================================================================
-                # Phase 1: 左右各自达标 — 单侧 EAR 偏离基线就单独开/合
+                # 左右各自达标 — 单侧 EAR 偏离基线就单独开/合
                 # ================================================================
-                if phase == 1:
-                    if l_ok and r_ok:
-                        # 两侧都已在各自基线容差内 → 进入 Phase 2
-                        phase = 2
-                        print(f"  [P1 → P2] L/R_EAR 均通过，进入对称调整 "
-                              f"(当前 sym={ear_sym:.4f}, 容差={sym_tol:.4f})")
-                        continue
+                moves = []
+                if not l_ok:
+                    moves.append(("L", EYELID_CHANNELS[0], EYELID_NAMES[0], l_delta))
+                if not r_ok:
+                    moves.append(("R", EYELID_CHANNELS[1], EYELID_NAMES[1], r_delta))
 
-                    moves = []
-                    if not l_ok:
-                        moves.append(("L", EYELID_CHANNELS[0], EYELID_NAMES[0], a8_sign, l_delta))
-                    if not r_ok:
-                        moves.append(("R", EYELID_CHANNELS[1], EYELID_NAMES[1], a9_sign, r_delta))
-
-                    moved_sides = []
-                    limit_notes = []
-                    action_parts = []
-                    for side, ch, name, sign, deviation in moves:
-                        # deviation > 0: 这侧比基线更开 → 合
-                        # deviation < 0: 这侧比基线更闭 → 开
-                        direction = -1 if deviation > 0 else 1
-                        delta_angle = sign * direction
-                        old_angle = current_angles[ch]
-                        lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
-                        new_angle = round(old_angle + delta_angle * ear_step)
-                        new_angle = max(lo, min(hi, new_angle))
-
-                        if new_angle == old_angle:
-                            limit_note = f"{name}到极限({old_angle}度)"
-                            limit_notes.append(limit_note)
-                            print(f"  [Eyelid P{phase} Iter {iteration:3d}] {limit_note}")
-                            continue
-
-                        self.send_servo(ch, new_angle, (lo, hi))
-                        current_angles[ch] = new_angle
-                        moved_sides.append(side)
-                        action = "合" if direction < 0 else "开"
-                        action_parts.append(f"{side}{action} Δ={deviation:+.4f}")
-                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}度 "
-                              f"(delta={deviation:+.4f}, {'close' if direction < 0 else 'open'} to own range)")
-
-                    if not moved_sides:
-                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] P1未移动: 未通过侧已到极限")
-                    # P1 动作 HUD
-                    action_text = (
-                        "P1→" + " ".join(action_parts)
-                        if action_parts else "P1未通过侧到极限"
-                    )
-                    display_phase_label = "P1:各自" if phase == 1 else "P2:对称"
-                    self.scorer.update_hud([
-                        (f"[Eyelid {display_phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                        (action_text, (10, 118), (0, 255, 200)),
-                        ("; ".join(limit_notes), (10, 136), (0, 180, 255)),
-                    ])
-
-                # ================================================================
-                # Phase 2: 左右对称 — EAR 高的一侧向低的一侧靠
-                # ================================================================
-                else:
-                    if not (l_ok and r_ok):
-                        phase = 1
-                        print(f"  [Eyelid P2 Iter {iteration:3d}] 单侧 EAR 离开通过区间 "
-                              f"(L_ok={l_ok} R_ok={r_ok})，回到P1各自达标")
-                        self.scorer.update_hud([
-                            (f"[Eyelid P1:各自 Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                            ("P2单侧离区间→回P1", (10, 118), (0, 180, 255)),
-                        ])
-                        continue
-
-                    if sym_ok:
-                        print(f"\n{'='*60}")
-                        print(f"  ★★ 眼皮调整通过! 共迭代 {iteration} 次 (Phase 2)")
-                        print(f"      L_EAR={l_ear:.4f}  R_EAR={r_ear:.4f}  Sym={ear_sym:.4f}")
-                        final_ang = " ".join([f"{n}={current_angles[c]}度"
-                                             for n, c in zip(EYELID_NAMES, EYELID_CHANNELS)])
-                        print(f"      角度: {final_ang}")
-                        print(f"{'='*60}\n")
-
-                        all_angles = []
-                        for ch in EYE_SERVO_CHANNELS:
-                            if ch in current_angles:
-                                all_angles.append(current_angles[ch])
-                            else:
-                                all_angles.append(self.controller.list_temp_deg[ch])
-                        self.save_result(all_angles)
-                        self.export_angle_config(all_angles)
-
-                        self.scorer.update_hud([("★★ EYELID PASSED ★★", (100, 80), (0, 255, 0))])
-                        time.sleep(1)
-                        return True, iteration, avg_signal
-
-                    # 高宽比高的一侧闭合，向低的一侧靠。
-                    if l_ear >= r_ear:
-                        side, ch, name, base_sign = "L", EYELID_CHANNELS[0], EYELID_NAMES[0], a8_sign
-                    else:
-                        side, ch, name, base_sign = "R", EYELID_CHANNELS[1], EYELID_NAMES[1], a9_sign
-
+                moved_sides = []
+                limit_notes = []
+                action_parts = []
+                for side, ch, name, deviation in moves:
+                    # deviation > 0: 这侧比基线更开 → 合
+                    # deviation < 0: 这侧比基线更闭 → 开
+                    desired_effect = "合" if deviation > 0 else "开"
+                    delta_angle = self._motion_delta(ch, desired_effect, ear_step)
                     old_angle = current_angles[ch]
                     lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
-                    new_angle = round(old_angle + base_sign * -1 * ear_step)
+                    new_angle = round(old_angle + delta_angle)
                     new_angle = max(lo, min(hi, new_angle))
-                    limit_note = ""
-                    if new_angle == old_angle:
-                        limit_note = f"{name}闭合到极限({old_angle}deg)"
-                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {limit_note}")
-                    else:
-                        self.send_servo(ch, new_angle, (lo, hi))
-                        current_angles[ch] = new_angle
-                        print(f"  [Eyelid P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}deg "
-                              f"(higher EAR closes toward lower, sym={ear_sym:.4f})")
 
-                    self.scorer.update_hud([
-                        (f"[Eyelid {phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                        (f"P2→合{side} 靠低EAR sym={ear_sym:.4f}", (10, 118), (255, 180, 0)),
-                        (limit_note, (10, 136), (0, 180, 255)),
-                    ])
+                    if new_angle == old_angle:
+                        limit_note = f"{name}到极限({old_angle}度)"
+                        limit_notes.append(limit_note)
+                        print(f"  [Eyelid Iter {iteration:3d}] {limit_note}")
+                        continue
+
+                    self.send_servo(ch, new_angle, (lo, hi))
+                    current_angles[ch] = new_angle
+                    moved_sides.append(side)
+                    action_parts.append(f"{side}{desired_effect} Δ={deviation:+.4f}")
+                    print(f"  [Eyelid Iter {iteration:3d}] {side}: {name}={new_angle}度 "
+                          f"(delta={deviation:+.4f}, {desired_effect} to own range)")
+
+                if not moved_sides:
+                    print(f"  [Eyelid Iter {iteration:3d}] 未移动: 未通过侧已到极限")
+                action_text = (
+                    " ".join(action_parts)
+                    if action_parts else "未通过侧到极限"
+                )
+                self.scorer.update_hud([
+                    (f"[Eyelid {phase_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                    (action_text, (10, 118), (0, 255, 200)),
+                    ("; ".join(limit_notes), (10, 136), (0, 180, 255)),
+                ])
 
                 # ---- 等待 ----
                 _waited = 0
                 while _waited < wait_seconds:
                     time.sleep(min(sleep_chunk, wait_seconds - _waited))
                     _waited += sleep_chunk
-                    p_label = "P1:各自" if phase == 1 else "P2:对称"
+                    p_label = "各自达标"
                     self.scorer.update_hud([
                         (f"[Eyelid {p_label} Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
                         (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
@@ -1056,7 +1337,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
             # 达到最大迭代未通过
             print(f"\n{'='*60}")
-            print(f"  ✘ 眼皮未在 {max_iterations} 次迭代内通过 (停在 Phase {phase})")
+            print(f"  ✘ 眼皮未在 {max_iterations} 次迭代内通过")
             print(f"{'='*60}\n")
             return False, iteration, {}
 
@@ -1316,9 +1597,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
         if log_func is None:
             log_func = print
-        a0_sign = getattr(self, '_eyebrow_a0_flip', -1)
-        a1_sign = getattr(self, '_eyebrow_a1_flip', -1)
-
         iteration = 0
         phase = 1  # start in Phase 1
         sleep_chunk = 0.1
@@ -1406,27 +1684,24 @@ class EyeAutoTuner(LipSideSamplingMixin):
                         side = "L"
                         ch = EYEBROW_CHANNELS[0]
                         name = EYEBROW_NAMES[0]
-                        sign = a0_sign
                         deviation = l_dev
                     else:
                         side = "R"
                         ch = EYEBROW_CHANNELS[1]
                         name = EYEBROW_NAMES[1]
-                        # A1 is mechanically opposite to A0:
-                        # A0 raise = angle +, A1 raise = angle -.
-                        sign = -a1_sign
                         deviation = r_dev
 
                     # deviation > 0 → 这侧更低 → 要抬高
                     # deviation < 0 → 这侧更高 → 要降低
-                    delta_angle = sign * (-1 if deviation > 0 else 1)
-                    new_angle = round(current_angles[ch] + delta_angle * ebhr_step)
+                    desired_effect = "上" if deviation > 0 else "下"
+                    delta_angle = self._motion_delta(ch, desired_effect, ebhr_step)
+                    new_angle = round(current_angles[ch] + delta_angle)
                     lo, hi = self.eyebrow_ranges[ch]
                     new_angle = max(lo, min(hi, new_angle))
                     self.send_servo(ch, new_angle, (lo, hi))
                     current_angles[ch] = new_angle
                     print(f"  [Eyebrow P{phase} Iter {iteration:3d}] {side}: {name}={new_angle}deg "
-                          f"(sym dev={deviation:+.4f}, toward midpoint)")
+                          f"(sym dev={deviation:+.4f}, {desired_effect} toward midpoint)")
 
                 # ---- Phase 2: 同步升降 ----
                 else:
@@ -1462,30 +1737,29 @@ class EyeAutoTuner(LipSideSamplingMixin):
                         return True, iteration, avg_signal
 
                     if avg_delta > 0:
-                        # 偏低 → 两边同时抬高 (delta负)
-                        direction = -1
+                        # 偏低 → 两边同时抬高
+                        desired_effect = "上"
                     elif avg_delta < 0:
-                        # 偏高 → 两边同时降低 (delta正)
-                        direction = 1
+                        # 偏高 → 两边同时降低
+                        desired_effect = "下"
                     else:
-                        direction = 0
+                        desired_effect = None
 
-                    # Phase 2: A0 和 A1 机械方向相反 → 符号翻转
-                    for side, ch, name, base_sign in [
-                        ("L", EYEBROW_CHANNELS[0], EYEBROW_NAMES[0], a0_sign),
-                        ("R", EYEBROW_CHANNELS[1], EYEBROW_NAMES[1], -a1_sign),
+                    for side, ch, name in [
+                        ("L", EYEBROW_CHANNELS[0], EYEBROW_NAMES[0]),
+                        ("R", EYEBROW_CHANNELS[1], EYEBROW_NAMES[1]),
                     ]:
-                        delta_angle = base_sign * direction
-                        new_angle = round(current_angles[ch] + delta_angle * ebhr_step)
+                        delta_angle = self._motion_delta(ch, desired_effect, ebhr_step) if desired_effect else 0
+                        new_angle = round(current_angles[ch] + delta_angle)
                         lo, hi = self.eyebrow_ranges[ch]
                         new_angle = max(lo, min(hi, new_angle))
                         self.send_servo(ch, new_angle, (lo, hi))
                         current_angles[ch] = new_angle
 
-                    if direction != 0:
+                    if desired_effect:
                         print(f"  [Eyebrow P{phase} Iter {iteration:3d}] Sync: L={current_angles[EYEBROW_CHANNELS[0]]}deg "
                               f"R={current_angles[EYEBROW_CHANNELS[1]]}deg "
-                              f"(avg_delta={avg_delta:+.4f}, dir={direction:+.0f})")
+                              f"(avg_delta={avg_delta:+.4f}, effect={desired_effect})")
 
                 _waited = 0
                 while _waited < wait_seconds:
@@ -1557,7 +1831,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
         start = self.controller.list_start_deg[ch]
         end = self.controller.list_end_deg[ch]
         chin_range = (min(start, end), max(start, end))
-        chin_sign = getattr(self, '_mouth_chin_flip', 1)  # 正方向: MAR大→合(角度减小)
 
         current_angle = self.controller.list_temp_deg[ch]
         print(f"  初始角度: A26={current_angle}° (range=[{chin_range[0]}, {chin_range[1]}])")
@@ -1613,15 +1886,15 @@ class EyeAutoTuner(LipSideSamplingMixin):
                     return True, iteration, avg_signal
 
                 # ---- 移动 A26 ----
-                # delta>0 → MAR太大(嘴太开) → 合(-1); delta<0 → MAR太小(嘴太闭) → 开(+1)
-                delta_sign = -1 if delta > tol else (1 if delta < -tol else 0)
-                move = chin_sign * delta_sign * mar_step
+                # delta>0 → MAR太大(嘴太开) → 合; delta<0 → MAR太小(嘴太闭) → 开。
+                desired_effect = "合" if delta > tol else "开"
+                move = self._motion_delta(ch, desired_effect, mar_step)
                 new_angle = round(current_angle + move)
                 new_angle = max(chin_range[0], min(chin_range[1], new_angle))
                 self.send_servo(ch, new_angle, chin_range)
                 current_angle = new_angle
                 print(f"  [Mouth Iter {iteration:3d}] 移动 A26={new_angle}° "
-                      f"(MAR Δ={delta:+.4f}, Δangle={move:+.1f})")
+                      f"(MAR Δ={delta:+.4f}, effect={desired_effect}, Δangle={move:+.1f})")
 
                 # ---- 等待 ----
                 _waited = 0
@@ -1743,8 +2016,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
         side_range = self._angle_range(ch_side)
         front_angle = self._temp_deg(ch_front, default=round(sum(front_range) / 2))
         side_angle = self._temp_deg(ch_side, default=round(sum(side_range) / 2))
-        front_sign = getattr(self, "_lower_lip_flip", -1)
-        side_sign = getattr(self, "_lower_lip_side_flip", 1)
 
         print("=" * 60)
         print("  Lower lip auto adjust: front LLR + side front point")
@@ -1810,16 +2081,16 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
                 moved = False
                 if not front_ok:
-                    front_dir = -1 if front_delta > LOWER_LIP_LLR_TOLERANCE else 1
-                    new_front = round(front_angle + front_sign * front_dir * step)
+                    desired_effect = "上" if front_delta > LOWER_LIP_LLR_TOLERANCE else "下"
+                    new_front = round(front_angle + self._motion_delta(ch_front, desired_effect, step))
                     new_front = max(front_range[0], min(front_range[1], new_front))
                     if new_front != front_angle:
                         front_angle = new_front
                         moved = True
                 elif side_y_out:
                     # 正面达标但侧面 y 超差时允许 A19 小步补偿；若下一轮 LLR 出界，会优先按正面纠正。
-                    front_dir = 1 if side_dy > LOWER_LIP_SIDE_Y_TOLERANCE else -1
-                    new_front = round(front_angle + front_dir * step)
+                    desired_effect = "上" if side_dy > LOWER_LIP_SIDE_Y_TOLERANCE else "下"
+                    new_front = round(front_angle + self._motion_delta(ch_front, desired_effect, step))
                     new_front = max(front_range[0], min(front_range[1], new_front))
                     if new_front != front_angle:
                         front_angle = new_front
@@ -1830,9 +2101,8 @@ class EyeAutoTuner(LipSideSamplingMixin):
                         }
 
                 if not side_ok and abs(side_dx) > LOWER_LIP_SIDE_X_TOLERANCE:
-                    # A18: 前=240, 后=180. side_dx>0 表示下唇前点太靠前，需减小角度往后。
-                    side_dir = -1 if side_dx > LOWER_LIP_SIDE_X_TOLERANCE else 1
-                    new_side = round(side_angle + side_sign * side_dir * step)
+                    desired_effect = "后" if side_dx > LOWER_LIP_SIDE_X_TOLERANCE else "前"
+                    new_side = round(side_angle + self._motion_delta(ch_side, desired_effect, step))
                     new_side = max(side_range[0], min(side_range[1], new_side))
                     if new_side != side_angle:
                         side_angle = new_side
@@ -1943,6 +2213,105 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
         return avg
 
+    def collect_mouth_corner_curl_samples(self, n_frames: int = 60, trim: int = 10):
+        """
+        打开 MP → 采集嘴角相对本侧内口裂点的上翘比例 → 修剪平均。
+
+        Returns:
+            dict 或 None: {"left": {curl,curl_px,delta,qualified},
+                           "right": {...},
+                           "all_qualified": bool}
+        """
+        mp_was_on = self.scorer.enable_mp
+        ellseg_was_on = self.scorer.enable_ellseg
+        self.scorer.enable_mp = True
+        self.scorer.enable_ellseg = False
+
+        samples = []
+        collected = 0
+        no_face_count = 0
+
+        try:
+            while collected < n_frames:
+                if self.scorer.user_pressed_stop:
+                    break
+
+                ok, frame = self.scorer.capture()
+                if not ok:
+                    time.sleep(0.001)
+                    continue
+
+                self.scorer.detect(frame)
+                signal = self.scorer.get_mouth_corner_curl_signal()
+                if signal is None:
+                    no_face_count += 1
+                    if no_face_count > 10:
+                        break
+                    time.sleep(0.001)
+                    continue
+                no_face_count = 0
+
+                score = (
+                    abs(signal["left"]["delta"]) + abs(signal["right"]["delta"])
+                    + (max(0.0, signal["min_target"] - signal["left"]["curl"]) if signal.get("min_required", True) else 0.0)
+                    + (max(0.0, signal["min_target"] - signal["right"]["curl"]) if signal.get("min_required", True) else 0.0)
+                    + signal["symmetry_delta"]
+                )
+                samples.append((score, {
+                    "left": dict(signal["left"]),
+                    "right": dict(signal["right"]),
+                    "mouth_width": signal["mouth_width"],
+                    "min_target": signal["min_target"],
+                    "min_required": signal.get("min_required", True),
+                    "symmetry_delta": signal["symmetry_delta"],
+                    "symmetry_tolerance": signal["symmetry_tolerance"],
+                }))
+                collected += 1
+
+                self.scorer.update_hud([
+                    (f"MouthCurl Sampling: {collected}/{n_frames}", (10, 120), (200, 200, 200)),
+                ])
+        finally:
+            self.scorer.enable_mp = mp_was_on
+            self.scorer.enable_ellseg = ellseg_was_on
+
+        if len(samples) < 2 * trim + 1:
+            print(f"  [MouthCurl Collect] 有效样本不足: {len(samples)}, 需要 >= {2*trim+1}")
+            return None
+
+        samples.sort(key=lambda x: x[0])
+        trimmed = samples[trim:-trim]
+        n = len(trimmed)
+
+        avg = {"left": {}, "right": {}}
+        min_required = any(s[1].get("min_required", True) for s in trimmed)
+        for side in ("left", "right"):
+            for key in ("curl", "curl_px", "delta", "target"):
+                avg[side][key] = sum(s[1][side][key] for s in trimmed) / n
+            avg[side]["min_qualified"] = (avg[side]["curl"] >= MOUTH_CORNER_CURL_MIN_TARGET) if min_required else True
+            if min_required:
+                avg[side]["target_qualified"] = abs(avg[side]["delta"]) <= MOUTH_CORNER_CURL_TOLERANCE
+            else:
+                avg[side]["target_qualified"] = round(avg[side]["curl"], 3) == round(avg[side]["target"], 3)
+            avg[side]["qualified"] = avg[side]["min_qualified"] and avg[side]["target_qualified"]
+
+        avg["mouth_width"] = sum(s[1]["mouth_width"] for s in trimmed) / n
+        avg["min_target"] = sum(s[1]["min_target"] for s in trimmed) / n
+        avg["min_required"] = min_required
+        avg["tolerance"] = MOUTH_CORNER_CURL_TOLERANCE
+        avg["symmetry_delta"] = abs(avg["left"]["curl"] - avg["right"]["curl"])
+        avg["symmetry_tolerance"] = sum(s[1]["symmetry_tolerance"] for s in trimmed) / n
+        avg["symmetry_qualified"] = avg["symmetry_delta"] <= MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE
+        avg["all_qualified"] = avg["left"]["qualified"] and avg["right"]["qualified"] and avg["symmetry_qualified"]
+
+        all_scores = [s[0] for s in samples]
+        print(f"  [MouthCurl Collect] {len(samples)} frames, trim {trim}: "
+              f"L={avg['left']['curl']:+.3f} R={avg['right']['curl']:+.3f} "
+              f"target=({avg['left']['target']:+.3f},{avg['right']['target']:+.3f}) "
+              f"sym={avg['symmetry_delta']:.3f}<={avg['symmetry_tolerance']:.3f} "
+              f"(min={all_scores[0]:.3f}, max={all_scores[-1]:.3f})")
+        return avg
+
     # ==================================================================
     # 引导式自动调整 — 嘴角 (A22-A25)  竖向优先 → 水平随后
     # ==================================================================
@@ -1992,9 +2361,6 @@ class EyeAutoTuner(LipSideSamplingMixin):
             for ch in [ch_Lh, ch_Rh, ch_Lv, ch_Rv]
         }
 
-        h_flip = -1 if getattr(self, '_corner_horiz_flip', False) else 1
-        v_flip = -1 if getattr(self, '_corner_vert_flip', False) else 1
-
         current = {ch: self._temp_deg(ch) for ch in [ch_Lh, ch_Rh, ch_Lv, ch_Rv]}
 
         print(f"{'='*60}")
@@ -2005,7 +2371,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
         bl = self.scorer.mouth_corners_baseline
         print(f"  基线: L=({bl['corner_left'][0]},{bl['corner_left'][1]}) "
               f"R=({bl['corner_right'][0]},{bl['corner_right'][1]})")
-        print(f"  方向翻转: horiz={h_flip==-1} vert={v_flip==-1}")
+        print(f"  方向: servo_motion_rules.yaml 目标动作映射")
         print(f"  初始: A22={current[ch_Rh]}° A23={current[ch_Lv]}° "
               f"A24={current[ch_Lh]}° A25={current[ch_Rv]}°")
         print(f"{'='*60}\n")
@@ -2090,19 +2456,23 @@ class EyeAutoTuner(LipSideSamplingMixin):
                         print(f"  [Corner-VERT {iteration:3d}] ★ 竖向收敛，进入水平阶段")
                         continue
                     if not L_dy_ok:
-                        s = v_flip if L_dy > 0 else -v_flip
-                        self._move_one(ch_Lv, s * step, ranges, current, moved, "A23")
+                        desired_effect = "上" if L_dy > 0 else "下"
+                        delta_angle = self._motion_delta(ch_Lv, desired_effect, step)
+                        self._move_one(ch_Lv, delta_angle, ranges, current, moved, "A23")
                     if not R_dy_ok:
-                        s = -v_flip if R_dy > 0 else v_flip
-                        self._move_one(ch_Rv, s * step, ranges, current, moved, "A25")
+                        desired_effect = "上" if R_dy > 0 else "下"
+                        delta_angle = self._motion_delta(ch_Rv, desired_effect, step)
+                        self._move_one(ch_Rv, delta_angle, ranges, current, moved, "A25")
                 else:
                     # ---- Phase 2: 水平 ----
                     if not L_dx_ok:
-                        s = h_flip if L_dx > 0 else -h_flip
-                        self._move_one(ch_Lh, s * step, ranges, current, moved, "A24")
+                        desired_effect = "前" if L_dx > 0 else "后"
+                        delta_angle = self._motion_delta(ch_Lh, desired_effect, step)
+                        self._move_one(ch_Lh, delta_angle, ranges, current, moved, "A24")
                     if not R_dx_ok:
-                        s = h_flip if R_dx > 0 else -h_flip
-                        self._move_one(ch_Rh, s * step, ranges, current, moved, "A22")
+                        desired_effect = "后" if R_dx > 0 else "前"
+                        delta_angle = self._motion_delta(ch_Rh, desired_effect, step)
+                        self._move_one(ch_Rh, delta_angle, ranges, current, moved, "A22")
 
                 if moved:
                     print(f"  [Corner-{phase} {iteration:3d}] -> " + " ".join(moved))
@@ -2112,6 +2482,141 @@ class EyeAutoTuner(LipSideSamplingMixin):
 
             print(f"\n{'='*60}")
             print(f"  ✘ 嘴角未通过 ({'竖向' if not vert_done else '水平'})")
+            print(f"{'='*60}\n")
+            return False, iteration, {}
+
+        finally:
+            if not keep_display:
+                self.scorer.stop_display()
+
+    def auto_adjust_mouth_corner_curl(
+        self,
+        step: float = 1.0,
+        max_iterations: int = None,
+        wait_seconds: float = None,
+        keep_display: bool = False,
+    ) -> tuple:
+        """
+        嘴角微翘自动调整：不匹配保存的嘴角像素点，只让嘴角相对本侧内口裂点达到目标上翘比例。
+
+        只调整竖向舵机 A23/A25，水平 A24/A22 不参与。
+        """
+        if max_iterations is None:
+            max_iterations = MOUTH_CORNER_MAX_ITERATIONS
+        if wait_seconds is None:
+            wait_seconds = MOUTH_CORNER_WAIT_SECONDS
+
+        ch_Lv = MOUTH_CORNER_V_CHANNELS[0]   # A23
+        ch_Rv = MOUTH_CORNER_V_CHANNELS[1]   # A25
+        ranges = {
+            ch: (min(self.controller.list_start_deg[ch], self.controller.list_end_deg[ch]),
+                 max(self.controller.list_start_deg[ch], self.controller.list_end_deg[ch]))
+            for ch in [ch_Lv, ch_Rv]
+        }
+        current = {ch: self._temp_deg(ch) for ch in [ch_Lv, ch_Rv]}
+
+        print(f"{'='*60}")
+        print("  嘴角微翘自动调整 (A23+A25)")
+        curl_baseline = getattr(self.scorer, "mouth_corner_curl_baseline", None)
+        if isinstance(curl_baseline, dict):
+            left_target = float(curl_baseline.get('left_curl', MOUTH_CORNER_CURL_TARGET))
+            right_target = float(curl_baseline.get('right_curl', MOUTH_CORNER_CURL_TARGET))
+            print(f"  目标: L={left_target:+.3f} R={right_target:+.3f} "
+                  f"(当前模板保存值，三位小数相等才通过)")
+        else:
+            print(f"  目标: curl={MOUTH_CORNER_CURL_TARGET:.3f} ± {MOUTH_CORNER_CURL_TOLERANCE:.3f} (默认)")
+            print(f"  未保存模板时最低微翘: {MOUTH_CORNER_CURL_MIN_TARGET:.3f}")
+        print(f"  左右对称: <= {MOUTH_CORNER_CURL_SYMMETRY_TOLERANCE:.3f}")
+        print(f"  步长: {step}°/次 | 最大迭代: {max_iterations} | 等待: {wait_seconds}s")
+        print(f"  初始: A23={current[ch_Lv]}° A25={current[ch_Rv]}°")
+        print(f"{'='*60}\n")
+
+        self.scorer.start_display()
+        iteration = 0
+        sleep_chunk = 0.1
+
+        def _wait():
+            waited = 0.0
+            while waited < wait_seconds:
+                time.sleep(min(sleep_chunk, wait_seconds - waited))
+                waited += sleep_chunk
+                if self.scorer.user_pressed_stop:
+                    break
+
+        try:
+            while iteration < max_iterations:
+                iteration += 1
+                if self.scorer.user_pressed_stop:
+                    print("\n[USER] 收到停止信号")
+                    break
+
+                self.scorer.update_hud([
+                    (f"[MouthCurl {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
+                ])
+
+                avg = self.collect_mouth_corner_curl_samples(n_frames=60, trim=10)
+                if avg is None:
+                    print(f"  [MouthCurl {iteration:3d}] 无效帧")
+                    _wait()
+                    continue
+
+                l_delta = avg["left"]["delta"]
+                r_delta = avg["right"]["delta"]
+                l_ok = avg["left"]["qualified"]
+                r_ok = avg["right"]["qualified"]
+                sym_ok = avg["symmetry_qualified"]
+
+                mark = lambda ok: "✓" if ok else "✗"
+                print(f"  [MouthCurl {iteration:3d}] "
+                      f"L={avg['left']['curl']:+.3f} Δ={l_delta:+.3f}{mark(l_ok)} "
+                      f"R={avg['right']['curl']:+.3f} Δ={r_delta:+.3f}{mark(r_ok)} "
+                      f"Sym={avg['symmetry_delta']:.3f}{mark(sym_ok)}")
+
+                if l_ok and r_ok and sym_ok:
+                    print(f"\n{'='*60}")
+                    print(f"  ★★ 嘴角微翘通过! {iteration} 次")
+                    print(f"      A23={current[ch_Lv]}° A25={current[ch_Rv]}°")
+                    print(f"{'='*60}\n")
+                    all_angles = [self._temp_deg(c) for c in EYE_SERVO_CHANNELS]
+                    self.save_result(all_angles)
+                    self.export_angle_config(
+                        all_angles,
+                        chin_angle=self._temp_deg(MOUTH_CHIN_CHANNEL),
+                        lower_lip_angle=self._temp_deg(LOWER_LIP_CHANNEL),
+                        upper_lip_angle=self._temp_deg(UPPER_LIP_CHANNEL),
+                        corner_angles={
+                            "A23": {"channel": ch_Lv, "angle": current[ch_Lv]},
+                            "A25": {"channel": ch_Rv, "angle": current[ch_Rv]},
+                        },
+                    )
+                    self.scorer.update_hud([("★★ MOUTH CURL PASSED ★★", (100, 80), (0, 255, 0))])
+                    time.sleep(1)
+                    return True, iteration, avg
+
+                moved = []
+                l_curl = avg["left"]["curl"]
+                r_curl = avg["right"]["curl"]
+                if not l_ok or (not sym_ok and l_curl < r_curl):
+                    desired_effect = "上" if l_delta < 0 else "下"
+                    if not sym_ok and l_curl < r_curl:
+                        desired_effect = "上"
+                    delta_angle = self._motion_delta(ch_Lv, desired_effect, step)
+                    self._move_one(ch_Lv, delta_angle, ranges, current, moved, "A23")
+                if not r_ok or (not sym_ok and r_curl < l_curl):
+                    desired_effect = "上" if r_delta < 0 else "下"
+                    if not sym_ok and r_curl < l_curl:
+                        desired_effect = "上"
+                    delta_angle = self._motion_delta(ch_Rv, desired_effect, step)
+                    self._move_one(ch_Rv, delta_angle, ranges, current, moved, "A25")
+
+                if moved:
+                    print(f"  [MouthCurl {iteration:3d}] -> " + " ".join(moved))
+                else:
+                    print(f"  [MouthCurl {iteration:3d}] 已达极限")
+                _wait()
+
+            print(f"\n{'='*60}")
+            print("  ✘ 嘴角微翘未通过")
             print(f"{'='*60}\n")
             return False, iteration, {}
 
