@@ -9,6 +9,9 @@ EllSeg Scorer — 基线标定 + 虹膜偏移检测 → 舵机引导
 """
 
 import os, sys, subprocess, urllib.request, cv2, numpy as np, json, torch, threading, time
+from camera_tuning import draw_camera_hud, snapshot as camera_snapshot
+from landmark_snapshot import LandmarkSnapshots, mediapipe_points, timestamp
+from reference_head_overlay import draw_reference
 
 # ============================================================
 # 配置
@@ -295,12 +298,15 @@ class EllSegDetector:
 
     def __init__(self, camera_index=0, width=1920, height=1080,
                  flip_horizontal=False, flip_vertical=False,
-                 stabilize_frames=8):
+                 stabilize_frames=8, rotate_180=True):
         self.width = width
         self.height = height
         self.flip_horizontal = False
         self.flip_vertical = False
+        self.rotate_180 = bool(rotate_180)  # 正面采集方向；检测、显示和快照共用
         self.stabilize_frames = stabilize_frames
+        self.camera_index = camera_index
+        self.landmark_snapshots = LandmarkSnapshots()
 
         # 检测模块开关
         self.enable_mp = False        # MediaPipe 人脸关键点检测
@@ -325,12 +331,27 @@ class EllSegDetector:
         # 打印摄像头当前参数
         #self._print_camera_capabilities()
 
-        # 强制 MJPG 格式以支持高帧率 (YUY2 默认不支持 120fps)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FPS, 120)
+        # DirectShow 设置 FPS/尺寸可能重置格式，因此最后请求 MJPG。
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 避免缓冲区堆积旧帧
+
+        fourcc_code = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        actual_fourcc = "".join(chr((fourcc_code >> (8 * i)) & 255) for i in range(4))
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[Detector] Camera {camera_index}: {actual_width}x{actual_height} "
+              f"FOURCC={actual_fourcc!r} (requested MJPG, 30 FPS)")
+        if actual_fourcc != "MJPG" or (actual_width, actual_height) != (width, height):
+            self.cap.release()
+            self.cap = None
+            self.landmarker.close()
+            self.landmarker = None
+            raise RuntimeError(
+                f"Front camera mode mismatch: got {actual_width}x{actual_height} "
+                f"FOURCC={actual_fourcc!r}; expected {width}x{height} MJPG")
 
         # EMA
         self.lm_smoother = LMASmoother(alpha=EMA_LM)
@@ -446,6 +467,7 @@ class EllSegDetector:
         self._disp_extra_texts = []       # 额外HUD文字 [(text, pos, color), ...]
         self._stop_event = threading.Event()
         self._display_thread = None
+        self._reference_head_display = (None, False)
         self._user_key = None             # 停止按键 (显示线程写入)
         self._last_key = None              # 最近一次任意按键
         self._capture_fps = 0.0             # 主循环捕获帧率 (display线程读取)
@@ -718,6 +740,11 @@ class EllSegDetector:
                         text += f" dY={off.get('_dy_eye_line', 0.0):+.1f}px"
                     cv2.putText(img, text, (x_off, 630), 0, 0.38, color, 1)
 
+                # Eye control parameters: reserved rows, also in standalone mode.
+                from eyeball_adaptive import hud_lines
+                for text, y in zip(hud_lines(getattr(self, "eyeball_control_mode", "fixed")), (580, 596)):
+                    cv2.putText(img, text, (x_off, y), 0, 0.29, (200, 200, 200), 1)
+
                 # mp0(人中) 实时坐标 — 右侧
                 if hasattr(self, '_last_lms_smooth') and self._last_lms_smooth is not None:
                     mp0 = self._last_lms_smooth[0]
@@ -959,7 +986,7 @@ class EllSegDetector:
                            f"LLSide cam={LOWER_LIP_SIDE_CAMERA_INDEX} VFlip={LOWER_LIP_SIDE_FLIP_VERTICAL} roi=[{lower_roi[0]},{lower_roi[1]},{lower_roi[2]},{lower_roi[3]}]",
                            (x_off, 698), 0, 0.35, (200, 220, 255), 1)
                 cv2.putText(img,
-                           f"FrontCam HFlip={self.flip_horizontal} VFlip={self.flip_vertical}",
+                           f"FrontCam HFlip={self.flip_horizontal} VFlip={self.flip_vertical} Rot180={self.rotate_180}",
                            (x_off, 716), 0, 0.35, (200, 220, 255), 1)
                 cv2.putText(img,
                            f"SideProfile center={SIDE_PROFILE_CROP_SIZE}x{SIDE_PROFILE_CROP_SIZE} "
@@ -1008,6 +1035,29 @@ class EllSegDetector:
                            f"F{SIDE_PROFILE_PREVIEW_FILTER_FRAMES} J{SIDE_PROFILE_PREVIEW_MAX_JUMP_PX:.0f}",
                            (x_off, 766), 0, 0.35, (200, 220, 255), 1)
 
+                # Camera settings and calibration gates remain visible in standalone mode.
+                if time.monotonic() - getattr(self, '_camera_hud_time', 0.0) >= 1.0:
+                    self._camera_hud_settings = camera_snapshot(self.cap)
+                    ref_fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+                    self._reference_fourcc = "".join(chr((ref_fourcc >> (8 * i)) & 255) for i in range(4))
+                    self._camera_hud_time = time.monotonic()
+                draw_camera_hud(img, getattr(self, '_camera_hud_settings', {}))
+
+                # Only the copied display image is changed; never modify det/targets.
+                ref_context = {
+                    "front_camera_index": self.camera_index,
+                    "width": img.shape[1], "height": img.shape[0],
+                    "fourcc": getattr(self, '_reference_fourcc', None),
+                    "rotate_180": self.rotate_180,
+                    "flip_horizontal": self.flip_horizontal,
+                    "flip_vertical": self.flip_vertical,
+                    "current_dots_visible": self.show_face_overlays,
+                }
+                ref_lines = draw_reference(
+                    img, det, getattr(self, '_reference_head_display', (None, False)), ref_context)
+                for ref_y, ref_text in zip((1022, 1038, 1054), ref_lines):
+                    cv2.putText(img, ref_text, (x_off, ref_y), 0, 0.35, (100, 255, 100), 1)
+
                 # 检测耗时拆解 (ms)
                 timing = det.get("_timing") 
                 if timing:
@@ -1054,6 +1104,8 @@ class EllSegDetector:
                 elif key == ord('3'):
                     self.show_all_landmarks = not self.show_all_landmarks
                     print(f"[Detector] Show Landmarks: {'ON' if self.show_all_landmarks else 'OFF'}")
+                elif key == ord('4'):
+                    self.save_landmark_snapshot()
                 elif key == ord('g') or key == ord('G'):
                     # 但注意不能和 [C] 等冲突: ord('G')=71, ord('g')=103
                     if not self.show_all_landmarks:
@@ -1064,6 +1116,13 @@ class EllSegDetector:
                     print(f"[Detector] Show EyeLine Offset: {'ON' if self.show_eye_line_offset else 'OFF'}")
                 elif key in (ord('q'), ord('Q'), 27):
                     self._user_key = key
+
+    def save_landmark_snapshot(self, logger=None):
+        if not self.cap.isOpened():
+            self.landmark_snapshots.invalidate("front", "camera_not_open")
+        elif not self.enable_mp:
+            self.landmark_snapshots.invalidate("front", "mediapipe_disabled")
+        return self.landmark_snapshots.request_save(logger=logger)
 
     def start_display(self):
         """启动显示线程（幂等，已运行则跳过）"""
@@ -1077,9 +1136,13 @@ class EllSegDetector:
 
     def stop_display(self):
         """停止显示线程"""
-        self._stop_event.set()
-        if self._display_thread and self._display_thread.is_alive():
-            self._display_thread.join(timeout=2)
+        # __init__ 可能在创建显示线程状态前失败。
+        stop_event = getattr(self, '_stop_event', None)
+        if stop_event is not None:
+            stop_event.set()
+        display_thread = getattr(self, '_display_thread', None)
+        if display_thread and display_thread.is_alive():
+            display_thread.join(timeout=2)
 
     def request_user_stop(self, reason="external"):
         """让外部控制面板复用 Q/Esc 的中断通道。"""
@@ -1146,22 +1209,23 @@ class EllSegDetector:
         return offset
 
     def _eyeball_head_adapter_offset(self, key):
-        adapter = self.head_adapter_baseline if isinstance(getattr(self, "head_adapter_baseline", None), dict) else None
-        if not adapter:
-            return (0.0, 0.0)
-        # Eye L/R here follows the user/servo semantics: L is screen-right,
-        # R is screen-left. head_position eye_right/eye_left are screen-based.
-        adapter_key = {
-            "left": "eye_right_offset",
-            "right": "eye_left_offset",
-            "nose": "nose_offset",
-        }.get(key)
-        if adapter_key is None:
-            return (0.0, 0.0)
-        value = adapter.get(adapter_key)
-        if value is None:
-            return (0.0, 0.0)
-        return (float(value[0]), float(value[1]))
+        # 暂停眼球目标的 head_adapter 修正：只追保存的绝对像素基准。
+        # 原实现保留注释，其他 head_position 功能仍可读取原 adapter。
+        # adapter = self.head_adapter_baseline if isinstance(getattr(self, "head_adapter_baseline", None), dict) else None
+        # if not adapter:
+        #     return (0.0, 0.0)
+        # adapter_key = {
+        #     "left": "eye_right_offset",
+        #     "right": "eye_left_offset",
+        #     "nose": "nose_offset",
+        # }.get(key)
+        # if adapter_key is None:
+        #     return (0.0, 0.0)
+        # value = adapter.get(adapter_key)
+        # if value is None:
+        #     return (0.0, 0.0)
+        # return (float(value[0]), float(value[1]))
+        return (0.0, 0.0)
 
     def _calc_target_offset(self, det):
         raw = self._calc_offset(det)
@@ -1180,7 +1244,9 @@ class EllSegDetector:
         return target_offset
 
     def _eyeball_target_mode(self):
-        return "head_adapter" if isinstance(getattr(self, "head_adapter_baseline", None), dict) else "raw"
+        # 暂停适配目标模式，HUD 和结果统一标记为未修正的基准模式。
+        # return "head_adapter" if isinstance(getattr(self, "head_adapter_baseline", None), dict) else "raw"
+        return "raw"
 
     def _eyeball_target_point(self, key):
         if not self.baseline:
@@ -1215,7 +1281,12 @@ class EllSegDetector:
     def capture(self):
         ok, frame = self.cap.read()
         if not ok:
+            self.landmark_snapshots.invalidate("front", "camera_read_failed")
             return False, None
+
+        # 在所有检测和绘制之前统一旋转，保证关键点与 JSON 使用同一坐标系。
+        if self.rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
 
         # 统计实际捕获帧率
         self._cap_fps_counter += 1
@@ -1230,11 +1301,13 @@ class EllSegDetector:
 
     def detect(self, frame):
         t_total = time.perf_counter()
+        detected_at = timestamp()
         h, w = frame.shape[:2]
         self._timestamp += 33
 
         # ---------- MediaPipe 开关 ----------
         if not self.enable_mp:
+            self.landmark_snapshots.invalidate("front", "mediapipe_disabled")
             self.lm_smoother.reset()
             self.ell_smooth_L.reset()
             self.ell_smooth_R.reset()
@@ -1250,6 +1323,7 @@ class EllSegDetector:
         t_mp = 1000 * (time.perf_counter() - t0)
 
         if not mp_result.face_landmarks:
+            self.landmark_snapshots.invalidate("front", "no_face")
             self.lm_smoother.reset()
             self.ell_smooth_L.reset()
             self.ell_smooth_R.reset()
@@ -1314,6 +1388,17 @@ class EllSegDetector:
         # 保存 lms_smooth 供 get_eyelid_signal() 使用
         self._last_lms_smooth = lms_smooth
 
+        self.landmark_snapshots.publish("front", {
+            "status": "detected", "camera_index": self.camera_index,
+            "detected_at": detected_at, "model_timestamp_ms": self._timestamp,
+            "frame_size": {"width": w, "height": h},
+            "coordinate_system": "detector_input_frame; x right, y down; raw z is MediaPipe normalized depth",
+            "flip_horizontal": self.flip_horizontal, "flip_vertical": self.flip_vertical,
+            "rotate_180": self.rotate_180,
+            "detector": "MediaPipe FaceLandmarker", "face_index": 0,
+            "point_count": len(face),
+            "landmarks": mediapipe_points(face, lms_smooth, w, h),
+        })
         self.last_result = out
         return out
 
@@ -2830,14 +2915,29 @@ class EllSegDetector:
 
     def close(self):
         self.stop_display()
-        if hasattr(self, 'landmarker') and self.landmarker:
-            self.landmarker.close()
-        if hasattr(self, 'cap') and self.cap:
-            self.cap.release()
-        cv2.destroyAllWindows()
+        if hasattr(self, 'landmark_snapshots'):
+            self.landmark_snapshots.invalidate("front", "camera_closed")
+        # detach first so explicit close followed by __del__ is safe.
+        landmarker = getattr(self, 'landmarker', None)
+        cap = getattr(self, 'cap', None)
+        self.landmarker = None
+        self.cap = None
+        try:
+            if landmarker is not None:
+                landmarker.close()
+        finally:
+            try:
+                if cap is not None:
+                    cap.release()
+            finally:
+                cv2.destroyAllWindows()
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            # 析构不得覆盖原始初始化异常或在解释器退出时再打印异常。
+            pass
 
 
 if __name__ == "__main__":

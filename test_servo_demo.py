@@ -10,7 +10,7 @@ from Motor import FaceController
 from utility import read_yaml
 
 # === 配置（与 run_interface.py 一致）===
-PORT = "COM5"
+PORT = "COM3"
 BAUDRATE = 115200    # ★ 实际UI使用的是 115200，不是 1000000！
 YAML_FILE = "servo_config.yaml"
 SERVO_NUM = 27

@@ -61,7 +61,7 @@
 
   <rect x="1486" y="76" width="390" height="88" rx="6" fill="#102633" stroke="#36a3ff"/>
   <text class="small" x="1500" y="98">眼球偏移</text>
-  <text class="tiny" x="1500" y="116">(1490,44/62) L/R target dX dY d, adapter mode shows raw</text>
+  <text class="tiny" x="1500" y="116">(1490,44/62) L/R raw baseline dX dY d; adapter OFF</text>
   <text class="tiny" x="1500" y="134">(1490,80) IrisY L/R: Top=0%, Bottom=100%</text>
   <text class="tiny" x="1500" y="152">(1490,98) IrisLid L/R offset/arc/state T A30t10 ON/OFF</text>
 
@@ -88,7 +88,7 @@
   <text class="tiny" x="1500" y="504">(1490,548/564) eye_left / eye_right coords</text>
   <text class="tiny" x="1500" y="524">(1490,612/630) mp0 / EyeLine H(+dY)</text>
   <text class="tiny" x="1500" y="544">(1490,648/664) ULSide tol / cam+roi</text>
-  <text class="tiny" x="1500" y="564">(1490,682/698/716) LLSide / FrontCam</text>
+  <text class="tiny" x="1500" y="564">(1490,682/698/716) LLSide / FrontCam Rot180</text>
 
   <rect x="1486" y="680" width="390" height="96" rx="6" fill="#18333a" stroke="#22d3ee"/>
   <text class="small" x="1500" y="702">侧面轮廓对线（免 ROI）</text>
@@ -99,8 +99,8 @@
   <!-- bottom info -->
   <rect class="panel" x="8" y="1040" width="650" height="32"/>
   <text class="small" x="18" y="1062">左下: MP / EllSeg / FaceDraw / SP4 / SPDash / SPGrid</text>
-  <rect class="panel" x="1590" y="1040" width="320" height="32"/>
-  <text class="small" x="1602" y="1062">右下: T / MP / Ell 耗时</text>
+  <rect class="panel" x="1590" y="1060" width="320" height="20"/>
+  <text class="tiny" x="1602" y="1072">右下: T / MP / Ell 耗时</text>
 
   <!-- summary callouts -->
   <rect class="warn" x="18" y="230" width="440" height="86"/>
@@ -116,4 +116,15 @@
 <text class="small" x="1490" y="878">Lower ROI=[manual] / SELECT</text>
 <text class="small" x="1490" y="894">Lower: color edge12 full-track peak1.5 turn2</text>
 <text class="small" x="1490" y="910">Lip hold=8px confirm=8 cluster=3px</text>
+<text class="small" x="1490" y="926">Cam fps=30 exposure=-6 gain=0</text>
+<text class="small" x="1490" y="942">Cam focus=0 autofocus=0 auto_exposure=0</text>
+<text class="small" x="1490" y="958">Cam WB=4500 auto=0</text>
+<text class="small" x="1490" y="974">CamTest 8s settle2s N&gt;=30 valid&gt;=90%</text>
+<text class="small" x="1490" y="990">CamTest proc&gt;=3 sharp&gt;=0.6x clip&lt;=10%</text>
+<text class="small" x="1490" y="1006">CamTest gray 20..235; rank worst-eye SD(px)</text>
+<text class="tiny" x="1490" y="1022" fill="#64ff64">RefHead Head_01: ON / OFF / BLOCKED</text>
+<text class="tiny" x="1490" y="1038" fill="#64ff64">Ref L: dX=+0.0 dY=+0.0 d=0.00px</text>
+<text class="tiny" x="1490" y="1054" fill="#64ff64">Ref R: dX=+0.0 dY=+0.0 d=0.00px</text>
+<text x="1490" y="580" font-size="11" fill="#c8c8c8">EyeCtl FIXED probe1 step0.5-3 gain0.6 resp&gt;=0.2px/d</text>
+<text x="1490" y="596" font-size="11" fill="#c8c8c8">Safe SD1.5 drift1 grow0.25 cross0.5 ratio2 stall3 N60t10</text>
 </svg>

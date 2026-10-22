@@ -2,6 +2,12 @@ import os
 import queue
 import sys
 import time
+import copy
+import threading
+from datetime import datetime, timedelta
+from landmark_snapshot import timestamp
+from calibration_result_snapshot import save_calibration_result
+from reference_head_overlay import load_reference
 from collections import deque
 from typing import Any, Callable, Optional
 
@@ -57,10 +63,12 @@ from lip_front_detector import (
 )
 
 try:
-    from PySide6.QtCore import QThread, Qt, Signal
+    from PySide6.QtCore import QThread, QTimer, Qt, Signal
     from PySide6.QtGui import QIntValidator
     from PySide6.QtWidgets import (
         QApplication,
+        QFileDialog,
+        QCheckBox,
         QComboBox,
         QGridLayout,
         QGroupBox,
@@ -79,10 +87,12 @@ try:
         QWidget,
     )
 except ModuleNotFoundError:
-    from PyQt5.QtCore import QThread, Qt, pyqtSignal as Signal
+    from PyQt5.QtCore import QThread, QTimer, Qt, pyqtSignal as Signal
     from PyQt5.QtGui import QIntValidator
     from PyQt5.QtWidgets import (
         QApplication,
+        QFileDialog,
+        QCheckBox,
         QComboBox,
         QGridLayout,
         QGroupBox,
@@ -311,6 +321,7 @@ class DetectorThread(QThread):
         self.detector.mouth_corner_curl_baseline = load_mouth_corner_curl_baseline()
         self.detector.head_position_baseline = load_head_position_baseline()
         self.detector.head_adapter_baseline = load_head_adapter_baseline()
+        self._snapshot_template_name = get_active_template()
         self._side_profile_slope_baseline = load_side_profile_slope_baseline()
         self.detector.side_nose_roi = load_side_nose_roi()
         self.detector.side_chin_roi = load_side_chin_roi()
@@ -351,9 +362,14 @@ class DetectorThread(QThread):
 
     def _start_detector(self) -> None:
         self.detector = EllSegDetector(camera_index=self.front_camera_index)
+        self._snapshot_template_name = get_active_template()
+        self.detector.landmark_snapshots.logger = self._log_landmark_snapshot
         actual_w = int(self.detector.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(self.detector.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.log.emit(f"Front camera opened: cam{self.front_camera_index} {actual_w}x{actual_h}")
+        fourcc_code = int(self.detector.cap.get(cv2.CAP_PROP_FOURCC))
+        actual_fourcc = "".join(chr((fourcc_code >> (8 * i)) & 255) for i in range(4))
+        self.log.emit(f"Front camera opened: cam{self.front_camera_index} "
+                      f"{actual_w}x{actual_h} FOURCC={actual_fourcc}")
         self.detector.enable_mp = True
         self.detector.enable_ellseg = True
         self.detector.show_iris_cover_overlay = self._iris_cover_overlay_enabled
@@ -363,6 +379,10 @@ class DetectorThread(QThread):
         self.detector.show_side_profile_coordinate_grid = self._side_profile_coordinate_grid_enabled
         self.detector.start_display()
         self.log.emit("Calibration camera started. [MP+EllSeg ON by default]")
+
+    def _log_landmark_snapshot(self, message):
+        print(message)
+        self.log.emit(message)
 
     def _process_detector_frame(self) -> bool:
         if self.detector is None:
@@ -413,6 +433,8 @@ class DetectorThread(QThread):
         return f"Side Camera {self.side_camera_index} - Lips"
 
     def _close_side_camera(self) -> None:
+        if self.detector is not None:
+            self.detector.landmark_snapshots.invalidate("side", "camera_closed")
         if self.side_cap is not None:
             try:
                 self.side_cap.release()
@@ -426,9 +448,12 @@ class DetectorThread(QThread):
 
     def _update_side_camera(self) -> None:
         if self.side_cap is None or not self.side_cap.isOpened():
+            if self.detector is not None:
+                self.detector.landmark_snapshots.invalidate("side", "camera_not_open")
             return
         ok, frame = self.side_cap.read()
         if not ok:
+            self.detector.landmark_snapshots.invalidate("side", "camera_read_failed")
             frame = np.full(
                 (SIDE_WINDOW_HEIGHT, SIDE_WINDOW_WIDTH, 3),
                 SIDE_READ_FAIL_FILL,
@@ -441,15 +466,30 @@ class DetectorThread(QThread):
             return
         if UPPER_LIP_SIDE_FLIP_VERTICAL:
             frame = cv2.flip(frame, 0)
+        self._snapshot_side_features = {}
+        side_time = timestamp()
         self._draw_side_hud(frame)
+        features = self._snapshot_side_features
+        count = sum(sum(point is not None for point in data["points"].values())
+                    for data in features.values())
+        self.detector.landmark_snapshots.publish("side", {
+            "status": "detected" if count else "no_valid_features_or_detection_disabled",
+            "camera_index": self.side_camera_index, "detected_at": side_time,
+            "frame_size": {"width": frame.shape[1], "height": frame.shape[0]},
+            "coordinate_system": "full detector_input_frame pixels; x right, y down",
+            "flip_vertical": UPPER_LIP_SIDE_FLIP_VERTICAL,
+            "point_count": count, "feature_sets": features,
+        })
         cv2.imshow(self.side_window_name, frame)
         self._pump_cv_events()
 
     def _pump_cv_events(self) -> None:
         try:
-            cv2.pollKey()
+            key = cv2.pollKey()
         except AttributeError:
-            cv2.waitKey(1)
+            key = cv2.waitKey(1)
+        if key & 0xFF == ord('4') and self.detector is not None:
+            self.detector.save_landmark_snapshot()
 
     def _draw_side_hud(self, frame: np.ndarray) -> None:
         if self._side_profile_coordinate_grid_enabled:
@@ -468,6 +508,11 @@ class DetectorThread(QThread):
 
         upper_tip = self._find_lip_front_tip(frame, upper_roi, LIP_TARGET_UPPER)
         lower_tip = self._find_lip_front_tip(frame, lower_roi, LIP_TARGET_LOWER)
+        self._snapshot_side_features["lip_roi"] = {
+            "detector": "find_lip_front_points", "processing": "raw",
+            "points": {"upper_lip": upper_tip, "lower_lip": lower_tip},
+            "upper_roi": upper_roi, "lower_roi": lower_roi,
+        }
 
         panel_bottom = SIDE_PANEL_SELECT_BOTTOM if self._side_roi_select_enabled else SIDE_PANEL_RIGHT_BOTTOM
         self._draw_hud_panel(frame, SIDE_PANEL_LEFT_TOP, panel_bottom)
@@ -563,6 +608,12 @@ class DetectorThread(QThread):
             require_feature_rois=True,
             nose_edge_contrast_min=SIDE_PROFILE_NOSE_EDGE_CONTRAST_MIN,
         )
+        self._snapshot_side_features["side_profile"] = {
+            "detector": "find_side_profile_points", "processing": "raw_before_preview_filter",
+            "points": copy.deepcopy(detected.get("points") or {}),
+            "metadata": copy.deepcopy({key: value for key, value in detected.items()
+                                       if key != "points" and not isinstance(value, np.ndarray)}),
+        }
         detected = self._stabilize_side_profile_detection(detected)
         nose_upper_target, lip_chin_target, _target_mode = self._side_profile_targets()
         signal = measure_side_profile_geometry(
@@ -966,6 +1017,9 @@ class DetectorThread(QThread):
             self._handle_command(command, payload)
 
     def _handle_command(self, command: str, payload: Any) -> None:
+        if command == "hourly_snapshot":
+            self._save_hourly_snapshot(payload)
+            return
         if command == "stop":
             self._running = False
             return
@@ -979,8 +1033,93 @@ class DetectorThread(QThread):
         except Exception as exc:
             self.log.emit(f"[ERROR] {command}: {exc}")
 
+    def _save_hourly_snapshot(self, payload) -> None:
+        scheduled, cancelled = payload
+        if cancelled.is_set():
+            return
+
+        def report(message):
+            self.log.emit(f"[每小时自动保存 计划={scheduled}] 时间={timestamp()} {message}")
+
+        try:
+            if self.detector is None:
+                report("[ERROR] 路径=未生成 front=unavailable side=unavailable；检测器未启动")
+                return
+            self.detector.save_landmark_snapshot(logger=report)
+        except Exception as exc:
+            report(f"[ERROR] 路径=未生成 front=unknown side=unknown；保存请求失败：{exc}")
+
+    def _save_calibration_result(self, payload) -> None:
+        if self._route_running:
+            self.log.emit("[Result][ERROR] 请等待当前调整结束后再保存结果。")
+            return
+        detector = self.detector
+        if detector is None:
+            self.log.emit("[Result][ERROR] 当前没有检测器。")
+            return
+        snapshots = detector.landmark_snapshots
+        with snapshots._lock:
+            item = snapshots._sources.get("front")
+            if item is None or time.monotonic() - item[0] > snapshots.MAX_AGE_SECONDS:
+                self.log.emit("[Result][ERROR] 当前检测数据不可用或已过期，请开启视觉检测后重试。")
+                return
+            metadata = {key: copy.deepcopy(item[1].get(key)) for key in (
+                "status", "detected_at", "model_timestamp_ms", "frame_size")}
+            metadata["age_seconds_at_request"] = time.monotonic() - item[0]
+        code = int(detector.cap.get(cv2.CAP_PROP_FOURCC))
+        camera = {
+            "front_camera_index": self.front_camera_index,
+            "side_camera_index": self.side_camera_index,
+            "width": int(detector.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(detector.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            "fourcc": "".join(chr((code >> (8 * i)) & 255) for i in range(4)),
+            "fps_property": detector.cap.get(cv2.CAP_PROP_FPS),
+            "fps_property_note": "Driver property, not measured throughput.",
+            "rotate_180": detector.rotate_180,
+            "flip_horizontal": getattr(detector, 'flip_horizontal', False),
+            "flip_vertical": getattr(detector, 'flip_vertical', False),
+        }
+        directory = save_calibration_result(
+            root=os.path.dirname(os.path.abspath(__file__)), detector=detector,
+            template_name=self._snapshot_template_name, camera_info=camera,
+            servo_cache=self._last_servo_temp_degrees, head_id=payload["head_id"],
+            qt_log=payload["qt_log"], detection_metadata=metadata,
+            prior_yaml=payload["prior_yaml"],
+        )
+        self.log.emit(f"[Result][OK] 已保存当前单帧观测：{directory}；历史60帧结果=null，未发送电机指令。")
+
+    def _load_reference_head(self, path) -> None:
+        detector = self.detector
+        enabled = getattr(detector, '_reference_head_display', (None, False))[1]
+        # Failed loads must not leave a different reference silently visible.
+        detector._reference_head_display = (None, enabled)
+        code = int(detector.cap.get(cv2.CAP_PROP_FOURCC))
+        camera = {
+            "front_camera_index": self.front_camera_index,
+            "width": int(detector.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(detector.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            "fourcc": "".join(chr((code >> (8 * i)) & 255) for i in range(4)),
+            "rotate_180": detector.rotate_180,
+            "flip_horizontal": detector.flip_horizontal,
+            "flip_vertical": detector.flip_vertical,
+        }
+        reference = load_reference(path, camera)
+        detector._reference_head_display = (reference, enabled)
+        self.log.emit(f"[Reference][OK] 已加载 {reference['head_id']} 的实际黄色点：{path}；"
+                      "差值=当前头-参考头，仅显示；勾选参考头叠加显示后可见。")
+
+    def _show_reference_head(self, enabled) -> None:
+        detector = self.detector
+        reference = getattr(detector, '_reference_head_display', (None, False))[0]
+        detector._reference_head_display = (reference, bool(enabled))
+        self.log.emit(f"[Reference] 叠加 {'ON' if enabled else 'OFF'}；"
+                      f"{'参考数据已加载' if reference else '请先加载参考头result.json'}。")
+
     def _command_handlers(self) -> dict[str, Callable[[Any], None]]:
         return {
+            "load_reference_head": self._load_reference_head,
+            "show_reference_head": self._show_reference_head,
+            "save_calibration_result": self._save_calibration_result,
             "template": self._handle_template_command,
             "toggle_mp": lambda _payload: self._toggle_detector_flag("enable_mp", "MediaPipe"),
             "toggle_ellseg": lambda _payload: self._toggle_detector_flag("enable_ellseg", "EllSeg"),
@@ -1340,6 +1479,11 @@ class DetectorThread(QThread):
         if self._route_running:
             self.log.emit("Route is already running.")
             return
+        self._eyeball_control_mode = payload.get("eyeball_mode", "fixed") if isinstance(payload, dict) else "fixed"
+        if self._eyeball_control_mode not in ("fixed", "adaptive"):
+            self.log.emit("[ERROR] Invalid eyeball control mode; route not started.")
+            self.route_finished.emit(route, False)
+            return
 
         try:
             self._prepare_route(route)
@@ -1447,6 +1591,8 @@ class DetectorThread(QThread):
             max_iterations=max_iterations,
             wait_seconds=1.0,
             keep_display=True,
+            mode=getattr(self, "_eyeball_control_mode", "fixed"),
+            log_func=self.log.emit,
         )
         self._emit_item_result("眼球", passed, iterations)
 
@@ -1733,12 +1879,57 @@ class CalibrationPanel(QMainWindow):
         self.log_box.setReadOnly(True)
         layout.addWidget(self.log_box, 1)
 
+        hourly_row = QHBoxLayout()
+        self.hourly_snapshot_checkbox = QCheckBox("每小时自动保存")
+        self.next_snapshot_label = QLabel("下一次自动保存时间：未开启")
+        hourly_row.addWidget(self.hourly_snapshot_checkbox)
+        hourly_row.addWidget(self.next_snapshot_label, 1)
+        layout.addLayout(hourly_row)
+        self._next_hourly_snapshot = None
+        self._hourly_cancelled = threading.Event()
+        self.hourly_snapshot_timer = QTimer(self)
+        self.hourly_snapshot_timer.setInterval(1000)
+        self.hourly_snapshot_timer.timeout.connect(self._check_hourly_snapshot)
+        self.hourly_snapshot_checkbox.toggled.connect(self._toggle_hourly_snapshot)
+
         self.servo_control_group = self._build_servo_control_group()
         layout.addWidget(self.servo_control_group)
 
         self.refresh_template_combo()
         self.refresh_template_status()
         self.start_detector()  # 摄像头自动打开
+
+    def _schedule_next_hourly_snapshot(self, now) -> None:
+        self._next_hourly_snapshot = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        self.next_snapshot_label.setText(
+            f"下一次自动保存时间：{self._next_hourly_snapshot:%Y-%m-%d %H:%M:%S}（本机时间）")
+
+    def _toggle_hourly_snapshot(self, enabled: bool) -> None:
+        self._hourly_cancelled.set()  # 取消尚未执行的旧请求；已开始写入的文件正常完成。
+        if enabled:
+            self._hourly_cancelled = threading.Event()
+            self._schedule_next_hourly_snapshot(datetime.now())
+            self.hourly_snapshot_timer.start()
+            self.append_log(f"每小时自动保存已开启；{self.next_snapshot_label.text()}")
+        else:
+            self.hourly_snapshot_timer.stop()
+            self._next_hourly_snapshot = None
+            self.next_snapshot_label.setText("下一次自动保存时间：未开启")
+            self.append_log("每小时自动保存已关闭。")
+
+    def _check_hourly_snapshot(self) -> None:
+        now = datetime.now()
+        if self._next_hourly_snapshot is None or now < self._next_hourly_snapshot:
+            return
+        scheduled = self._next_hourly_snapshot.isoformat(sep=" ")
+        # 先推进截止时间，避免重复提交；休眠恢复后只尝试一次，不补写历史数据。
+        self._schedule_next_hourly_snapshot(now)
+        worker = self.detector_thread
+        if worker is None or not worker.isRunning():
+            self.append_log(f"[每小时自动保存 计划={scheduled}] 时间={timestamp()} "
+                            "[ERROR] 路径=未生成 front=unavailable side=unavailable；检测线程未运行")
+            return
+        worker.send(("hourly_snapshot", (scheduled, self._hourly_cancelled)))
 
     def current_template(self) -> str:
         return self.template_combo.currentText()
@@ -2020,6 +2211,15 @@ class CalibrationPanel(QMainWindow):
         iter_row.addWidget(self.max_iterations_spin)
         layout.addLayout(iter_row)
 
+        eye_mode_row = QHBoxLayout()
+        eye_mode_row.addWidget(QLabel("眼球A10–A13步长"))
+        self.eyeball_mode_combo = QComboBox()
+        self.eyeball_mode_combo.addItem("固定1°（默认）", "fixed")
+        self.eyeball_mode_combo.addItem("自适应（实验，最大3°）", "adaptive")
+        self.eyeball_mode_combo.setToolTip("仅影响眼球像素匹配；每次路线启动时读取，不改变其他模块。")
+        eye_mode_row.addWidget(self.eyeball_mode_combo)
+        layout.addLayout(eye_mode_row)
+
         for label, route in self.ROUTE_BUTTONS:
             btn = QPushButton(label)
             btn.clicked.connect(lambda _checked=False, route=route: self.start_route(route))
@@ -2031,6 +2231,15 @@ class CalibrationPanel(QMainWindow):
         export_btn = QPushButton("导出调整后YAML")
         export_btn.clicked.connect(lambda _checked=False: self.send_detector("export_adjusted_yaml"))
         layout.addWidget(export_btn)
+        result_btn = QPushButton("保存当前标定结果")
+        result_btn.clicked.connect(self.save_current_calibration_result)
+        layout.addWidget(result_btn)
+        reference_btn = QPushButton("加载参考头 result.json")
+        reference_btn.clicked.connect(self.load_reference_head)
+        layout.addWidget(reference_btn)
+        reference_toggle = QCheckBox("参考头叠加显示")
+        reference_toggle.toggled.connect(self.toggle_reference_head)
+        layout.addWidget(reference_toggle)
         layout.addStretch(1)
         return group
 
@@ -2167,6 +2376,41 @@ class CalibrationPanel(QMainWindow):
         self.detector_thread = None
         self.set_manual_controls_enabled(True)
 
+    def load_reference_head(self) -> None:
+        if self.detector_thread is None:
+            self.append_log("[Reference][ERROR] 请先开启视觉检测。")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "加载参考头标定结果", os.path.dirname(os.path.abspath(__file__)),
+            "Result JSON (*.json)")
+        if path:
+            self.detector_thread.send(("load_reference_head", path))
+
+    def toggle_reference_head(self, enabled: bool) -> None:
+        if self.detector_thread is not None:
+            self.detector_thread.send(("show_reference_head", bool(enabled)))
+
+    def save_current_calibration_result(self) -> None:
+        if self.detector_thread is None:
+            self.append_log("[Result][ERROR] 检测程序尚未运行。")
+            return
+        if self.detector_thread._route_running:
+            self.append_log("[Result][ERROR] 请等待当前调整结束后再保存结果。")
+            return
+        head_id, ok = QInputDialog.getText(
+            self, "保存当前标定结果", "头部编号（字母、数字、下划线或短横线）:", text="Head_01")
+        if not ok:
+            return
+        prior_yaml, _ = QFileDialog.getOpenFileName(
+            self, "选择重启前从软件指令缓存导出的YAML（取消则不保存）",
+            os.path.dirname(os.path.abspath(__file__)), "YAML (*.yaml *.yml)")
+        if not prior_yaml:
+            return
+        self.detector_thread.send(("save_calibration_result", {
+            "head_id": head_id.strip(), "prior_yaml": prior_yaml,
+            "qt_log": self.log_box.toPlainText(),
+        }))
+
     def send_detector(self, command: str) -> None:
         if self.detector_thread is None:
             return
@@ -2209,6 +2453,7 @@ class CalibrationPanel(QMainWindow):
         payload = {
             "route": route,
             "max_iterations": self.max_iterations_spin.value(),
+            "eyeball_mode": self.eyeball_mode_combo.currentData(),
         }
         self.reset_route_statuses(route)
         self.append_log(
@@ -2234,6 +2479,8 @@ class CalibrationPanel(QMainWindow):
         self.append_log(f"[STATUS] {item}: {text}")
 
     def closeEvent(self, event: Any) -> None:
+        self.hourly_snapshot_timer.stop()
+        self._hourly_cancelled.set()
         self.stop_detector()
         event.accept()
 

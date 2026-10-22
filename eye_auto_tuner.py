@@ -19,6 +19,8 @@ import os
 import time
 import json
 from typing import List, Tuple
+from eyeball_adaptive import valid_signal, sample_quality
+from eyeball_closed_loop import run_eyeball_loop
 
 from Motor import FaceController
 from Communication import UARTDevice
@@ -76,10 +78,13 @@ EYELID_NAMES = [f"A{ch}" for ch in EYELID_CHANNELS]
 class EyeAutoTuner(LipSideSamplingMixin):
     """眼睛舵机调整工具"""
 
+    eye_servo_channels = EYE_SERVO_CHANNELS
+    eyeball_tolerance = TOLERANCE
+
     def __init__(
         self,
         yaml_file: str = DEFAULT_SERVO_CONFIG_FILE,
-        port: str = "COM5",
+        port: str = "COM3",
         baudrate: int = 115200,
         servo_num: int = 27,
         stabilize_frames: int = 8,
@@ -292,8 +297,11 @@ class EyeAutoTuner(LipSideSamplingMixin):
         samples = []  # list of (total_dist, offsets_dict)
         collected = 0
         no_face_count = 0
+        attempts = 0
+        self._last_guide_sample_info = None
 
-        while collected < n_frames:
+        while collected < n_frames and attempts < n_frames * 6:
+            attempts += 1
             if self.scorer.user_pressed_stop:
                 break
 
@@ -305,7 +313,7 @@ class EyeAutoTuner(LipSideSamplingMixin):
             self.scorer.detect(frame)
             signal = self.scorer.get_guide_signal()
 
-            if signal is None:
+            if not valid_signal(signal):
                 no_face_count += 1
                 if no_face_count > 10:  # 连续10帧无脸 → 放弃
                     break
@@ -333,8 +341,9 @@ class EyeAutoTuner(LipSideSamplingMixin):
         self.scorer.enable_mp = False
         self.scorer.enable_ellseg = False
 
-        if len(samples) < 2 * trim + 1:
-            print(f"  [Collect] 有效样本不足: {len(samples)}, 需要 ≥ {2*trim+1}")
+        self._last_guide_sample_info = sample_quality(samples)
+        if len(samples) != n_frames or len(samples) < 2 * trim + 1:
+            print(f"  [Collect] 不完整测量: {len(samples)}/{n_frames}; 丢弃，不用于动作或验收")
             return None
 
         # ---- 3. 排序 + 修剪 ----
@@ -371,213 +380,16 @@ class EyeAutoTuner(LipSideSamplingMixin):
         max_iterations: int = 50,
         wait_seconds: float = 1.0,
         keep_display: bool = False,
+        mode: str = "fixed",
+        log_func=None,
     ) -> Tuple[bool, int, dict]:
+        """A10--A13 only. Fixed 1 degree by default; adaptive is opt-in.
+
+        pixel_to_degree is kept for call compatibility; responses are measured
+        online in adaptive mode, never inferred from this historical argument.
         """
-        引导式自动调整 — 只调整 A10-A13 眼球舵机。
-
-        流程（每轮迭代）:
-          1. 打开 MP + EllSeg
-          2. 采集 60 帧 → 去最高/最低各 10 帧 → 中间 40 帧求平均偏移
-          3. 关闭 MP + EllSeg
-          4. 若平均偏移 ≤ TOLERANCE → 通过
-          5. 否则按平均偏移方向移动舵机 → 等待 → 下一轮
-
-        Args:
-            pixel_to_degree:   像素→角度换算系数
-            max_iterations:    最大循环次数
-            wait_seconds:      每次移动后等待秒数
-
-        Returns:
-            (passed: bool, iterations: int, final_region_scores: dict)
-        """
-        if self.scorer.baseline is None:
-            print("[WARN] 未加载基线! 请先运行 ellseg_scorer.py 按 [S] 保存基线到 face_point.json")
-            return False, 0, {}
-
-        print(f"{'='*60}")
-        print(f"  引导式自动调整 (仅眼球 A10-A13)")
-        print(f"  采集: 60帧, 修剪上下10帧, 中间40帧取平均")
-        print(f"  系数: {pixel_to_degree} °/px | 最大迭代: {max_iterations} | "
-              f"等待: {wait_seconds}s")
-        print(f"  目标: 平均偏移 ≤ {TOLERANCE}px")
-        print(f"{'='*60}\n")
-
-        self.scorer.start_display()
-
-        current_angles = {ch: self.controller.list_temp_deg[ch] for ch in EYEBALL_CHANNELS}
-        print(f"  初始角度: {dict(zip(EYEBALL_NAMES, [current_angles[c] for c in EYEBALL_CHANNELS]))}")
-
-        iteration = 0
-        sleep_chunk = 0.1
-        l_x_locked = False
-        r_x_locked = False
-
-        try:
-            while iteration < max_iterations:
-                iteration += 1
-
-                if self.scorer.user_pressed_stop:
-                    print("\n[USER] 收到停止信号")
-                    break
-
-                self.scorer.update_hud([
-                    (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                ])
-
-                # ---- 步骤 1+2: 采集60帧 → 修剪平均 ----
-                avg_signal = self.collect_guide_samples(n_frames=60, trim=10)
-
-                if avg_signal is None:
-                    self.scorer.update_hud([
-                        (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                        (f"Signal: None (no valid frames)", (10, 118), (0, 160, 255)),
-                    ])
-                    print(f"  [Iter {iteration:3d}] 无法获取有效帧")
-
-                    _waited = 0
-                    while _waited < wait_seconds:
-                        time.sleep(min(sleep_chunk, wait_seconds - _waited))
-                        _waited += sleep_chunk
-                        if self.scorer.user_pressed_stop:
-                            break
-                    continue
-
-                l_dx = avg_signal["L_dX"]
-                l_dy = avg_signal["L_dY"]
-                r_dx = avg_signal["R_dX"]
-                r_dy = avg_signal["R_dY"]
-                l_dist = avg_signal["L_dist"]
-                r_dist = avg_signal["R_dist"]
-
-                # ---- 步骤 3: 已关闭 MP/EllSeg (collect_guide_samples 已关) ----
-
-                # ---- 步骤 4: 检查是否已合格 ----
-                l_qualified = l_dist <= TOLERANCE
-                r_qualified = r_dist <= TOLERANCE
-                qualified = (l_qualified and r_qualified)
-
-                dist_s = f"L={l_dist:.1f}px R={r_dist:.1f}px"
-                print(f"  [Iter {iteration:3d}] 平均偏移: {dist_s} | "
-                      f"L(dX={l_dx:+.1f} dY={l_dy:+.1f}) "
-                      f"R(dX={r_dx:+.1f} dY={r_dy:+.1f})")
-
-                if qualified:
-                    print(f"\n{'='*60}")
-                    print(f"  ★★ 通过! 共迭代 {iteration} 次")
-                    print(f"      平均偏移: L={l_dist:.1f}px R={r_dist:.1f}px")
-                    final_ang = " ".join([f"{n}={current_angles[c]}°"
-                                         for n, c in zip(EYEBALL_NAMES, EYEBALL_CHANNELS)])
-                    print(f"      角度: {final_ang}")
-                    print(f"{'='*60}\n")
-
-                    all_angles = [current_angles.get(ch, 0) for ch in EYE_SERVO_CHANNELS]
-                    self.save_result(all_angles)
-                    self.export_angle_config(all_angles)
-
-                    self.scorer.update_hud([("★★ PASSED ★★", (120, 80), (0, 255, 0))])
-                    time.sleep(1)
-                    return True, iteration, {}
-
-                # ---- 步骤 5: 按平均偏移移动舵机 ----
-                l_adj_x = avg_signal["L_adj_X"]
-                r_adj_x = avg_signal["R_adj_X"]
-                l_adj_y = avg_signal["L_adj_Y"]
-                r_adj_y = avg_signal["R_adj_Y"]
-                if l_qualified:
-                    l_adj_x = 0.0
-                    l_adj_y = 0.0
-                if r_qualified:
-                    r_adj_x = 0.0
-                    r_adj_y = 0.0
-                if abs(l_dx) <= TOLERANCE:
-                    l_x_locked = True
-                if abs(r_dx) <= TOLERANCE:
-                    r_x_locked = True
-                if l_x_locked:
-                    l_adj_x = 0.0
-                if abs(l_dy) <= TOLERANCE:
-                    l_adj_y = 0.0
-                if r_x_locked:
-                    r_adj_x = 0.0
-                if abs(r_dy) <= TOLERANCE:
-                    r_adj_y = 0.0
-
-                # 方向由 servo_motion_rules.yaml 决定，只改舵机动作，不改 raw dx/dy。
-                def effect_delta(ch, effect, value):
-                    return self._motion_delta(ch, effect) if value != 0 else 0.0
-
-                adj_map = {
-                    EYEBALL_CHANNELS[0]: effect_delta(
-                        EYEBALL_CHANNELS[0],
-                        "上" if l_adj_y < 0 else "下",
-                        l_adj_y,
-                    ),
-                    EYEBALL_CHANNELS[1]: effect_delta(
-                        EYEBALL_CHANNELS[1],
-                        "上" if r_adj_y < 0 else "下",
-                        r_adj_y,
-                    ),
-                    EYEBALL_CHANNELS[2]: effect_delta(
-                        EYEBALL_CHANNELS[2],
-                        "内" if l_adj_x < 0 else "外",
-                        l_adj_x,
-                    ),
-                    EYEBALL_CHANNELS[3]: effect_delta(
-                        EYEBALL_CHANNELS[3],
-                        "外" if r_adj_x < 0 else "内",
-                        r_adj_x,
-                    ),
-                }
-
-                move_channels = []
-                move_angles = []
-                move_ranges = []
-                moved = []
-                for idx, ch in enumerate(EYEBALL_CHANNELS):
-                    delta = adj_map[ch]
-                    if delta == 0:
-                        continue
-                    new_angle = round(current_angles[ch] + delta)
-                    lo, hi = self.angle_ranges[EYE_SERVO_CHANNELS.index(ch)]
-                    new_angle = max(lo, min(hi, new_angle))
-                    move_channels.append(ch)
-                    move_angles.append(new_angle)
-                    move_ranges.append((lo, hi))
-                    moved.append(f"{EYEBALL_NAMES[idx]}={new_angle}°(Δ{delta:+.1f})")
-
-                if moved:
-                    sent = self.send_servos(move_channels, move_angles, move_ranges)
-                    if sent:
-                        for ch, angle in zip(move_channels, move_angles):
-                            current_angles[ch] = angle
-                    print(f"  [Iter {iteration:3d}] Eyeball serial sent={sent}")
-
-                if not moved:
-                    print(f"  [Iter {iteration:3d}] 无需移动 (偏移为0)")
-                else:
-                    print(f"  [Iter {iteration:3d}] 舵机移动: {' '.join(moved)}")
-
-                # ---- 步骤 6: 等待 ----
-                _waited = 0
-                while _waited < wait_seconds:
-                    time.sleep(min(sleep_chunk, wait_seconds - _waited))
-                    _waited += sleep_chunk
-                    self.scorer.update_hud([
-                        (f"[Iter {iteration}/{max_iterations}]", (10, 100), (200, 200, 200)),
-                        (f"Waiting... {_waited:.1f}/{wait_seconds}s", (10, 118), (0, 255, 255)),
-                    ])
-                    if self.scorer.user_pressed_stop:
-                        break
-
-            # 达到最大迭代未通过
-            print(f"\n{'='*60}")
-            print(f"  ✘ 未在 {max_iterations} 次迭代内通过")
-            print(f"{'='*60}\n")
-            return False, iteration, {}
-
-        finally:
-            if not keep_display:
-                self.scorer.stop_display()
+        return run_eyeball_loop(self, max_iterations, wait_seconds,
+                                keep_display, mode, log_func)
 
     def auto_adjust_iris_lid_contact(
         self,

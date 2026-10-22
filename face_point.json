@@ -3,18 +3,18 @@
   "active_template": "template_2",
   "common": {
     "nose": [
-      945,
-      540
+      955,
+      685
     ],
     "iris_left": [
-      1028,
-      427
+      1054,
+      545
     ],
     "iris_right": [
-      850,
-      431
+      857,
+      547
     ],
-    "eye_line_y": 429.0,
+    "eye_line_y": 546.0,
     "camera_config": {
       "front_camera_index": 1,
       "side_camera_index": 0
@@ -112,23 +112,23 @@
     },
     "template_2": {
       "eyelid": {
-        "left_ear": 0.36700080388227463,
-        "right_ear": 0.3611021042208699,
+        "left_ear": 0.37177490160124776,
+        "right_ear": 0.370210532899599,
         "eye_lr_basis": "marked"
       },
       "eyebrow": {
-        "left_slope": 0.23193835956194025,
-        "right_slope": -0.1819383314663615,
-        "slope_symmetry": 0.41387669102830177,
-        "left_brow_iris_gap": -0.5303509758402452,
-        "right_brow_iris_gap": -0.5615847445202098,
+        "left_slope": 0.21571604107125417,
+        "right_slope": -0.17861821184315865,
+        "slope_symmetry": 0.3943342529144128,
+        "left_brow_iris_gap": -0.48894480106067995,
+        "right_brow_iris_gap": -0.486033269895351,
         "eye_lr_basis": "marked"
       },
       "mouth": {
-        "mar": 0.6946555449213372
+        "mar": 0.6275280657880595
       },
       "lower_lip": {
-        "llr": 0.13932923762996563,
+        "llr": 0.12534814801820313,
         "side_lower_tip": [
           963,
           557
@@ -141,7 +141,7 @@
         ]
       },
       "upper_lip": {
-        "ulr": 1.1503319680956683,
+        "ulr": 1.2027270581550233,
         "side_upper_tip": [
           982,
           506
@@ -155,71 +155,71 @@
       },
       "mouth_corners": {
         "nose": [
-          945,
-          540
+          955,
+          685
         ],
         "corner_left": [
-          1000,
-          607
+          1019,
+          750
         ],
         "corner_right": [
-          887,
-          608
+          896,
+          749
         ],
         "eye_lr_basis": "marked"
       },
       "mouth_corner_curl": {
-        "left_curl": 0.0011422569983089222,
-        "right_curl": -0.0002750557522432366
+        "left_curl": 0.0039142220518881745,
+        "right_curl": 0.003383865510011734
       },
       "head_position": {
         "nose_px": [
-          945,
-          540
+          955,
+          685
         ],
         "eye_left": [
-          820,
-          435
+          823,
+          553
         ],
         "eye_right": [
-          1061,
-          430
+          1092,
+          549
         ],
         "frame_width": 1920,
         "frame_height": 1080,
         "eye_center": [
-          940.5,
-          432.5
+          957.5,
+          551.0
         ],
-        "eye_distance": 241.1,
-        "eye_line_angle_deg": -1.189,
-        "eye_line_slope": -0.020747,
+        "eye_distance": 269.0,
+        "eye_line_angle_deg": -0.852,
+        "eye_line_slope": -0.01487,
         "nose_to_eye_center": [
-          4.5,
-          107.5
+          -2.5,
+          134.0
         ]
       },
       "head_adapter": {
         "nose_offset": [
-          0.326,
-          0.121
+          0.908,
+          -1.045
         ],
         "eye_left_offset": [
-          0.725,
-          0.229
+          0.327,
+          -1.364
         ],
         "eye_right_offset": [
-          0.936,
-          0.404
+          0.411,
+          -0.911
         ],
         "eye_center_offset": [
-          0.831,
-          0.316
+          0.369,
+          -1.137
         ],
-        "eye_distance_offset": 0.159171,
-        "eye_line_angle_offset_deg": 0.042582,
-        "eye_line_slope_offset": 0.000744,
-        "point_max_offset": 1.019511
+        "eye_distance_offset": 0.107253,
+        "eye_line_angle_offset_deg": 0.096658,
+        "eye_line_slope_offset": 0.001687,
+        "point_max_offset": 1.402498
       },
       "side_profile_slopes": {
         "nose_upper_slope": 1.45614,

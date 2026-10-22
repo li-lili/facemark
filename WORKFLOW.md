@@ -44,7 +44,7 @@
 │                    (舵机控制 + 自动调整算法)                            │
 │                                                                        │
 │  EyeAutoTuner                                                         │
-│  ├── controller: FaceController (UART 舵机硬件, COM5 115200)         │
+│  ├── controller: FaceController (UART 舵机硬件, COM3 115200)         │
 │  ├── scorer: EllSegDetector (外部传入共享 / 自建)                     │
 │  │                                                                    │
 │  ├── auto_adjust()              → A10-A13 眼球                        │

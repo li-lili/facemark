@@ -1,0 +1,11 @@
+﻿# Python cache
+__pycache__/
+*.pyc
+
+# Generated experiment data
+benchmark_results/
+calibration_results/
+landmark_snapshots/
+
+# Logs
+*.log
